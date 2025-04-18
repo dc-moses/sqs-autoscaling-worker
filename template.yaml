@@ -1,0 +1,3 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Simple autoscaling EC2 queue worker using SQS and CloudWatch
+...
