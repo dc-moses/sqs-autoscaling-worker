@@ -111,7 +111,3 @@ python3 destroy.py
 ```
 
 ---
-
-## ✅ Done!
-
-Let me know if you'd like to add retries, dashboards, spot instances, or scale-out to N workers!
