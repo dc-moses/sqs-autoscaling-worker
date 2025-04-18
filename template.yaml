@@ -1,3 +1,174 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Simple autoscaling EC2 queue worker using SQS and CloudWatch
-...
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t3.micro
+  WorkerScriptKey:
+    Type: String
+    Description: S3 key for the worker Python script
+  WorkerScriptBucket:
+    Type: String
+    Description: S3 bucket name for the worker Python script
+
+Outputs:
+  SQSQueueURL:
+    Description: URL of the SQS Queue
+    Value: !Ref JobQueue
+    Export:
+      Name: JobQueueURL
+
+  S3BucketName:
+    Description: Name of the S3 bucket containing the worker script
+    Value: !Ref WorkerBucket
+
+  LambdaFunctionName:
+    Description: Name of the associated Lambda function (predefined)
+    Value: sqs-worker-lambda
+    Export:
+      Name: SQSWorkerLambdaName
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: SimpleQueueVPC
+
+  Subnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs "" ]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: SimpleQueueSubnet
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  Route:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Subnet
+      RouteTableId: !Ref RouteTable
+
+  JobQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: job-queue
+
+  WorkerBucket:
+    Type: AWS::S3::Bucket
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [ !Ref EC2Role ]
+
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SQSPollPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub arn:aws:s3:::${WorkerScriptBucket}/*
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Name: !Ref InstanceProfile
+        ImageId: ami-0c02fb55956c7d316 # Amazon Linux 2 (x86_64)
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            yum update -y
+            yum install -y python3 aws-cli
+            aws s3 cp s3://${WorkerScriptBucket}/${WorkerScriptKey} /home/ec2-user/worker.py
+            chmod +x /home/ec2-user/worker.py
+            nohup python3 /home/ec2-user/worker.py ${JobQueue} &
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      MinSize: '0'
+      MaxSize: '1'
+      DesiredCapacity: '0'
+      VPCZoneIdentifier:
+        - !Ref Subnet
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+
+  ScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: SimpleScaling
+      AdjustmentType: ChangeInCapacity
+      ScalingAdjustment: 1
+      Cooldown: 300
+
+  QueueAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: SQSMessageAlarm
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt JobQueue.QueueName
+      AlarmActions:
+        - !Ref ScaleUpPolicy
