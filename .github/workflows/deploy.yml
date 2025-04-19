@@ -1,4 +1,4 @@
-name: Deploy SQS Worker with Lambda-Driven Scaling
+name: Deploy SQS Worker
 
 on:
   push:
@@ -33,14 +33,29 @@ jobs:
       - name: Install dependencies
         run: pip install boto3
 
-      - name: Deploy CloudFormation stack
-        run: python3 deploy.py
+      - name: Discover default subnet and write to env
+        id: subnet
+        run: |
+          SUBNET_ID=$(aws ec2 describe-subnets --filters Name=default-for-az,Values=true --query "Subnets[0].SubnetId" --output text)
+          echo "SUBNET_ID=$SUBNET_ID" >> $GITHUB_ENV
+          echo "Discovered subnet: $SUBNET_ID"
 
-      - name: Package Lambda function
-        run: zip lambda.zip lambda_trigger.py
+      - name: Deploy CloudFormation stack
+        run: |
+          set +e
+          python3 deploy.py
+          STATUS=$?
+          if [ $STATUS -ne 0 ]; then
+            echo "⚠️ Deployment failed. Capturing logs..."
+            aws cloudformation describe-stack-events --stack-name SQSWorkerStack \
+              --query "StackEvents[?ResourceStatus=='ROLLBACK_COMPLETE'].[LogicalResourceId,ResourceStatusReason]" \
+              --output table || echo "⚠️ Failed to fetch stack events."
+          fi
+          exit $STATUS
 
       - name: Deploy or Create Lambda function
         run: |
+          zip lambda.zip lambda_trigger.py
           if aws lambda get-function --function-name $LAMBDA_NAME > /dev/null 2>&1; then
             aws lambda update-function-code \
               --function-name $LAMBDA_NAME \
@@ -64,60 +79,75 @@ jobs:
           echo "Updating Lambda with QUEUE_URL=$QUEUE_URL"
           aws lambda update-function-configuration \
             --function-name $LAMBDA_NAME \
-            --environment "Variables={QUEUE_URL=$QUEUE_URL}"
+            --environment "Variables={\"QUEUE_URL\":\"$QUEUE_URL\"}"
 
-      - name: Send test message to SQS
+      - name: Deploy API Gateway
+        run: |
+          sed -i "s/YourLambdaFunctionName/$LAMBDA_NAME/g" deploy_api_gateway.py
+          python3 deploy_api_gateway.py
+
+      - name: Send test job to SQS
         run: |
           QUEUE_URL=$(aws cloudformation describe-stacks \
             --stack-name SQSWorkerStack \
             --query "Stacks[0].Outputs[?OutputKey=='SQSQueueURL'].OutputValue" \
             --output text)
-          aws sqs send-message \
-            --queue-url "$QUEUE_URL" \
-            --message-body '{"wait_seconds":10}'
+          echo "Sending test job to queue: $QUEUE_URL"
+          aws sqs send-message --queue-url "$QUEUE_URL" --message-body '{"wait_seconds":10}'
 
-      - name: Wait for ASG to scale up to 1 and down to 0
+      - name: Wait for ASG to scale up and down
         run: |
-          set -e
           ASG_NAME=$(aws cloudformation describe-stack-resources \
             --stack-name SQSWorkerStack \
             --query "StackResources[?ResourceType=='AWS::AutoScaling::AutoScalingGroup'].PhysicalResourceId" \
             --output text)
 
-          echo "Waiting for ASG to scale up..."
+          echo "Polling ASG: $ASG_NAME for scale-up..."
           for i in {1..40}; do
-            INSTANCE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
+            DESIRED=$(aws autoscaling describe-auto-scaling-groups \
               --auto-scaling-group-names "$ASG_NAME" \
-              --query "length(AutoScalingGroups[0].Instances)" \
+              --query "AutoScalingGroups[0].DesiredCapacity" \
               --output text)
-            if [ "$INSTANCE_COUNT" -gt 0 ]; then
-              echo "✅ ASG scaled up."
+
+            INSTANCE_ID=$(aws autoscaling describe-auto-scaling-groups \
+              --auto-scaling-group-names "$ASG_NAME" \
+              --query "AutoScalingGroups[0].Instances[0].InstanceId" \
+              --output text)
+
+            if [ "$DESIRED" -ge 1 ] && [ "$INSTANCE_ID" != "None" ]; then
+              echo "✅ ASG scaled up with instance $INSTANCE_ID."
               break
             fi
             sleep 30
           done
 
-          echo "Waiting for ASG to scale back down to 0..."
+          echo "Waiting for ASG to scale down to 0..."
           for i in {1..40}; do
             INSTANCE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
               --auto-scaling-group-names "$ASG_NAME" \
               --query "length(AutoScalingGroups[0].Instances)" \
               --output text)
+
+            echo "Poll $i: Current instance count = $INSTANCE_COUNT"
             if [ "$INSTANCE_COUNT" -eq 0 ]; then
-              echo "✅ ASG scaled down."
+              echo "✅ EC2 instance has terminated and ASG scaled down to 0."
               break
             fi
             sleep 30
           done
 
-      - name: Cleanup CloudFormation and S3 Bucket (if needed)
+      - name: Cleanup CloudFormation stack and S3 bucket
         if: always()
         run: |
-          echo "Cleaning up stack and bucket..."
+          echo "🧹 Cleaning up CloudFormation stack and S3 bucket..."
           aws cloudformation delete-stack --stack-name SQSWorkerStack || true
-          BUCKET_NAME=$(aws s3api list-buckets \
-            --query "Buckets[?starts_with(Name, 'worker-bucket-')].Name" \
-            --output text | head -n1)
-          aws s3 rm s3://$BUCKET_NAME --recursive || true
-          aws s3api delete-bucket --bucket $BUCKET_NAME || true
-          echo "✅ Cleanup complete."
+          aws cloudformation wait stack_delete_complete --stack-name SQSWorkerStack || echo "⚠️ Stack deletion waiter timed out"
+
+          BUCKET_NAME=$(aws s3api list-buckets --query "Buckets[?starts_with(Name, 'worker-bucket-')].Name" --output text | head -n1)
+          if [ -n "$BUCKET_NAME" ]; then
+            aws s3 rm s3://$BUCKET_NAME --recursive || true
+            aws s3api delete-bucket --bucket $BUCKET_NAME || true
+            echo "✅ Bucket $BUCKET_NAME deleted."
+          else
+            echo "No matching worker bucket found."
+          fi

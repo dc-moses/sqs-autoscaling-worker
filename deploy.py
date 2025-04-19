@@ -53,29 +53,31 @@ def deploy_stack(bucket, subnet):
                 {"ParameterKey": "SubnetId", "ParameterValue": subnet},
             ]
         )
-    except botocore.exceptions.ClientError as e:
-        if "AlreadyExistsException" in str(e):
-            print("⚠️ Stack already exists. Waiting for it to be ready...")
-            try:
-                waiter = cf.get_waiter("stack_create_complete")
-                waiter.wait(StackName=STACK_NAME)
-                print("✅ Existing stack is now ready.")
-                return True
-            except botocore.exceptions.WaiterError as we:
-                print(f"❌ Stack exists but is not in a ready state: {we}")
-                return False
-        else:
-            raise
-
-    try:
-        print("⏳ Waiting for stack creation to complete...")
         waiter = cf.get_waiter("stack_create_complete")
         waiter.wait(StackName=STACK_NAME)
         print("✅ Stack created successfully.")
         return True
     except botocore.exceptions.WaiterError as e:
         print(f"❌ Stack creation failed: {e}")
+        log_stack_failure()
         return False
+    except botocore.exceptions.ClientError as e:
+        if "AlreadyExistsException" in str(e):
+            print("⚠️ Stack already exists.")
+        else:
+            print(f"❌ Stack creation error: {e}")
+        return False
+
+
+def log_stack_failure():
+    print("🔍 Logging stack failure reasons...")
+    try:
+        events = cf.describe_stack_events(StackName=STACK_NAME)["StackEvents"]
+        for event in events:
+            if event["ResourceStatus"] in ["ROLLBACK_IN_PROGRESS", "CREATE_FAILED"]:
+                print(f"🔴 {event['LogicalResourceId']}: {event.get('ResourceStatusReason', 'No reason provided')}")
+    except Exception as e:
+        print(f"⚠️ Could not fetch stack events: {e}")
 
 
 def cleanup(bucket):
