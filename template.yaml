@@ -19,7 +19,8 @@ Resources:
     Type: AWS::EC2::LaunchTemplate
     Properties:
       LaunchTemplateData:
-        ImageId: ami-0c55b159cbfafe1f0  # Amazon Linux 2 (example)
+        ImageId:
+          Fn::Sub: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2}}"
         InstanceType: t2.micro
         UserData:
           Fn::Base64: !Sub |
@@ -91,3 +92,4 @@ Outputs:
     Value: !Ref AutoScalingGroup
     Export:
       Name: !Sub "${AWS::StackName}-ASGName"
+

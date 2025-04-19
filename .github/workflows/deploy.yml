@@ -58,6 +58,7 @@ jobs:
               --handler lambda_trigger.lambda_handler \
               --zip-file fileb://lambda.zip \
               --environment Variables={QUEUE_URL=dummy-to-be-updated}
+          fi
 
       - name: Update Lambda environment with real queue URL
         run: |
