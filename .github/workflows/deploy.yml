@@ -67,7 +67,7 @@ jobs:
               --role arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-ci-role \
               --handler lambda_trigger.lambda_handler \
               --zip-file fileb://lambda.zip \
-              --environment Variables="{QUEUE_URL=dummy-to-be-updated}"
+              --environment Variables=QUEUE_URL=dummy-to-be-updated
           fi
 
       - name: Update Lambda environment with real queue URL
@@ -79,7 +79,7 @@ jobs:
           echo "Updating Lambda with QUEUE_URL=$QUEUE_URL"
           aws lambda update-function-configuration \
             --function-name $LAMBDA_NAME \
-            --environment "Variables={\"QUEUE_URL\":\"$QUEUE_URL\"}"
+            --environment Variables=QUEUE_URL=$QUEUE_URL
 
       - name: Deploy API Gateway
         run: |
