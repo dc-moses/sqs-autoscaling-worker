@@ -1,39 +1,37 @@
 import boto3
+import time
 import uuid
-import os
 import traceback
+import os
 
 STACK_NAME = "SQSWorkerStack"
-REGION = "us-east-1"
 SCRIPT_KEY = "worker.py"
-
-s3 = boto3.client("s3", region_name=REGION)
+REGION = "us-east-1"
 cf = boto3.client("cloudformation", region_name=REGION)
+s3 = boto3.client("s3", region_name=REGION)
 ec2 = boto3.client("ec2", region_name=REGION)
 
-
 def create_bucket_and_upload():
-    bucket_name = f"worker-bucket-{uuid.uuid4().hex[:8]}"
+    suffix = str(uuid.uuid4())[:8]
+    bucket_name = f"worker-bucket-{suffix}"
     print(f"Creating bucket: {bucket_name}")
-
     s3.create_bucket(
         Bucket=bucket_name,
         CreateBucketConfiguration={"LocationConstraint": REGION}
     )
-
     s3.upload_file(SCRIPT_KEY, bucket_name, SCRIPT_KEY)
     print(f"Uploaded {SCRIPT_KEY} to s3://{bucket_name}/{SCRIPT_KEY}")
     return bucket_name
-
 
 def get_default_subnet():
     subnets = ec2.describe_subnets(
         Filters=[{"Name": "default-for-az", "Values": ["true"]}]
     )["Subnets"]
+    if not subnets:
+        raise Exception("No default subnet found.")
     subnet_id = subnets[0]["SubnetId"]
     print(f"Using subnet: {subnet_id}")
     return subnet_id
-
 
 def deploy_stack():
     bucket = create_bucket_and_upload()
@@ -44,24 +42,6 @@ def deploy_stack():
 
     print("Deploying CloudFormation stack...")
 
-    # Use list_stacks instead of describe_stacks for reliability
-    stack_exists = False
-    stacks = cf.list_stacks(
-        StackStatusFilter=[
-            "CREATE_IN_PROGRESS", "CREATE_FAILED", "CREATE_COMPLETE",
-            "ROLLBACK_IN_PROGRESS", "ROLLBACK_FAILED", "ROLLBACK_COMPLETE",
-            "UPDATE_IN_PROGRESS", "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS",
-            "UPDATE_COMPLETE", "UPDATE_ROLLBACK_IN_PROGRESS",
-            "UPDATE_ROLLBACK_FAILED", "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS",
-            "UPDATE_ROLLBACK_COMPLETE"
-        ]
-    )["StackSummaries"]
-
-    for stack in stacks:
-        if stack["StackName"] == STACK_NAME:
-            stack_exists = True
-            break
-
     parameters = [
         {"ParameterKey": "WorkerScriptBucket", "ParameterValue": bucket},
         {"ParameterKey": "WorkerScriptKey", "ParameterValue": SCRIPT_KEY},
@@ -69,8 +49,18 @@ def deploy_stack():
     ]
 
     try:
-        if stack_exists:
+        try:
+            cf.describe_stacks(StackName=STACK_NAME)
+            stack_exists = True
             print(f"Stack {STACK_NAME} exists — updating.")
+        except cf.exceptions.ClientError as e:
+            if "does not exist" in str(e):
+                stack_exists = False
+                print(f"Stack {STACK_NAME} does not exist — creating.")
+            else:
+                raise
+
+        if stack_exists:
             cf.update_stack(
                 StackName=STACK_NAME,
                 TemplateBody=template_body,
@@ -79,7 +69,6 @@ def deploy_stack():
             )
             waiter = cf.get_waiter("stack_update_complete")
         else:
-            print(f"Stack {STACK_NAME} does not exist — creating.")
             cf.create_stack(
                 StackName=STACK_NAME,
                 TemplateBody=template_body,
@@ -105,7 +94,6 @@ def deploy_stack():
         print("🚫 Skipping cleanup so you can inspect the failed stack.")
         traceback.print_exc()
         exit(1)
-
 
 if __name__ == "__main__":
     deploy_stack()
