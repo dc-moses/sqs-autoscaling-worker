@@ -96,7 +96,7 @@ jobs:
               --query "AutoScalingGroups[0].Instances[0].InstanceId" \
               --output text)
 
-            if [[ "$DESIRED" -ge 1 && "$INSTANCE_ID" != "None" ]]; then
+            if [ "$DESIRED" -ge 1 ] && [ "$INSTANCE_ID" != "None" ]; then
               echo "✅ ASG scaled up with instance $INSTANCE_ID."
               break
             fi
@@ -124,12 +124,28 @@ jobs:
 
             echo "Post-job check $i: Instances=$INSTANCE_COUNT"
 
-            if [[ "$INSTANCE_COUNT" -eq 0 ]]; then
+            if [ "$INSTANCE_COUNT" -eq 0 ]; then
               echo "✅ EC2 instance has terminated and ASG scaled back to 0."
-              exit 0
+              TERMINATION_REASON=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID \
+                --query "Reservations[0].Instances[0].StateTransitionReason" --output text)
+              echo "Termination reason: $TERMINATION_REASON"
+              break
             fi
             sleep 10
           done
 
           echo "❌ EC2 instance did not terminate in expected time."
           exit 1
+
+      - name: Delete worker bucket after stack creation
+        if: always()
+        run: |
+          BUCKET_NAME=$(aws s3api list-buckets --query "Buckets[?starts_with(Name, 'worker-bucket-')].Name" --output text | head -n1)
+          echo "Cleaning up bucket: $BUCKET_NAME"
+          if [ -n "$BUCKET_NAME" ]; then
+            aws s3 rm s3://$BUCKET_NAME --recursive || true
+            aws s3api delete-bucket --bucket $BUCKET_NAME || true
+            echo "✅ Bucket $BUCKET_NAME deleted."
+          else
+            echo "No matching worker bucket found to clean up."
+          fi
