@@ -20,6 +20,8 @@ Resources:
               - sqs:*
               - lambda:*
               - apigateway:*
+              - "ssm:GetParameters"
+
             Resource: "*"
 
   DeployRole:
