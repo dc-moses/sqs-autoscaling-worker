@@ -31,6 +31,10 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+          - Effect: Allow
+            Principal:
               Federated: arn:aws:iam::319319364622:oidc-provider/token.actions.githubusercontent.com
             Action: sts:AssumeRoleWithWebIdentity
             Condition:
