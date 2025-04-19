@@ -44,14 +44,16 @@ def deploy_stack():
 
     print("Deploying CloudFormation stack...")
 
+    stack_exists = False
     try:
-        cf.describe_stacks(StackName=STACK_NAME)
-        stack_exists = True
-        print(f"Stack {STACK_NAME} already exists — updating it.")
+        stacks = cf.describe_stacks(StackName=STACK_NAME)
+        for stack in stacks["Stacks"]:
+            if stack["StackName"] == STACK_NAME:
+                stack_exists = True
+                break
     except cf.exceptions.ClientError as e:
         if "does not exist" in str(e):
             stack_exists = False
-            print(f"Stack {STACK_NAME} does not exist — creating it.")
         else:
             raise
 
@@ -63,6 +65,7 @@ def deploy_stack():
 
     try:
         if stack_exists:
+            print(f"Stack {STACK_NAME} exists — updating.")
             cf.update_stack(
                 StackName=STACK_NAME,
                 TemplateBody=template_body,
@@ -71,6 +74,7 @@ def deploy_stack():
             )
             waiter = cf.get_waiter("stack_update_complete")
         else:
+            print(f"Stack {STACK_NAME} does not exist — creating.")
             cf.create_stack(
                 StackName=STACK_NAME,
                 TemplateBody=template_body,
@@ -100,4 +104,3 @@ def deploy_stack():
 
 if __name__ == "__main__":
     deploy_stack()
-
