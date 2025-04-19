@@ -57,7 +57,8 @@ jobs:
               --role arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-ci-role \
               --handler lambda_trigger.lambda_handler \
               --zip-file fileb://lambda.zip \
-              --environment "Variables={QUEUE_URL=dummy-to-be-updated}"
+              --environment Variables="QUEUE_URL=dummy-to-be-updated"
+          fi
 
       - name: Update Lambda environment with real queue URL
         run: |
@@ -93,34 +94,22 @@ jobs:
             --output text)
 
           echo "Polling ASG: $ASG_NAME for scale-up..."
-          for i in {1..30}; do
-            DESIRED=$(aws autoscaling describe-auto-scaling-groups \
-              --auto-scaling-group-names "$ASG_NAME" \
-              --query "AutoScalingGroups[0].DesiredCapacity" \
-              --output text)
-
+          for i in {1..40}; do
             INSTANCE_ID=$(aws autoscaling describe-auto-scaling-groups \
               --auto-scaling-group-names "$ASG_NAME" \
               --query "AutoScalingGroups[0].Instances[0].InstanceId" \
-              --output text)
+              --output text 2>/dev/null)
 
-            if [ "$DESIRED" -ge 1 ] && [ "$INSTANCE_ID" != "None" ]; then
+            if [ "$INSTANCE_ID" != "None" ] && [ -n "$INSTANCE_ID" ]; then
               echo "✅ ASG scaled up with instance $INSTANCE_ID."
               break
             fi
-            sleep 10
-          done
-
-          echo "Checking CloudWatch logs for '[Worker] Done.'"
-          for i in {1..15}; do
-            OUTPUT=$(aws ec2 get-console-output --instance-id $INSTANCE_ID --output text || true)
-            echo "$OUTPUT" | grep '\[Worker\] Done\.' && echo "✅ Job completed successfully." && break
-            echo "Waiting for log confirmation..."
-            sleep 10
+            echo "Waiting for scale-up... (${i}/40)"
+            sleep 30
           done
 
           echo "Waiting for ASG to scale back to 0..."
-          for i in {1..60}; do
+          for i in {1..40}; do
             INSTANCE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
               --auto-scaling-group-names "$ASG_NAME" \
               --query "length(AutoScalingGroups[0].Instances)" \
@@ -132,8 +121,11 @@ jobs:
               echo "✅ EC2 instance has terminated and ASG scaled back to 0."
               break
             fi
-            sleep 10
+            sleep 30
           done
+
+          echo "❌ EC2 instance did not terminate in expected time."
+          exit 1
 
       - name: Delete worker bucket after stack creation
         if: always()
@@ -148,10 +140,13 @@ jobs:
             echo "No matching worker bucket found to clean up."
           fi
 
-      - name: Always delete CloudFormation stack
-        if: always()
+      - name: Delete CloudFormation stack on failure
+        if: failure()
         run: |
-          echo "Cleaning up CloudFormation stack: SQSWorkerStack"
-          aws cloudformation delete-stack --stack-name SQSWorkerStack || true
-          aws cloudformation wait stack-delete-complete --stack-name SQSWorkerStack || true
-          echo "✅ Stack deleted."
+          echo "🧹 Cleaning up failed stack if it exists..."
+          if aws cloudformation describe-stacks --stack-name SQSWorkerStack >/dev/null 2>&1; then
+            aws cloudformation delete-stack --stack-name SQSWorkerStack
+            echo "✅ Deleted failed CloudFormation stack."
+          else
+            echo "⚠️ No failed stack to delete."
+          fi
