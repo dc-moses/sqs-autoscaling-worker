@@ -12,7 +12,6 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     env:
       LAMBDA_NAME: sqs-worker-lambda
 
@@ -52,7 +51,6 @@ jobs:
               --handler lambda_trigger.lambda_handler \
               --zip-file fileb://lambda.zip \
               --environment Variables={QUEUE_URL=dummy-to-be-updated}
-          fi
 
       - name: Update Lambda environment with real queue URL
         run: |
@@ -69,31 +67,69 @@ jobs:
           sed -i "s/YourLambdaFunctionName/$LAMBDA_NAME/g" deploy_api_gateway.py
           python3 deploy_api_gateway.py
 
-  destroy:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    needs: deploy
+      - name: Send test job to SQS
+        run: |
+          QUEUE_URL=$(aws cloudformation describe-stacks \
+            --stack-name SQSWorkerStack \
+            --query "Stacks[0].Outputs[?OutputKey=='SQSQueueURL'].OutputValue" \
+            --output text)
+          echo "Sending test job to queue: $QUEUE_URL"
+          aws sqs send-message --queue-url "$QUEUE_URL" --message-body '{"wait_seconds":10}'
 
-    env:
-      LAMBDA_NAME: sqs-worker-lambda
+      - name: Wait for ASG to scale to 1 and back to 0
+        run: |
+          set -e
+          ASG_NAME=$(aws cloudformation describe-stack-resources \
+            --stack-name SQSWorkerStack \
+            --query "StackResources[?ResourceType=='AWS::AutoScaling::AutoScalingGroup'].PhysicalResourceId" \
+            --output text)
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+          echo "Polling ASG: $ASG_NAME for scale-up..."
+          for i in {1..30}; do
+            DESIRED=$(aws autoscaling describe-auto-scaling-groups \
+              --auto-scaling-group-names "$ASG_NAME" \
+              --query "AutoScalingGroups[0].DesiredCapacity" \
+              --output text)
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
-        with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-ci-role
-          aws-region: us-east-1
+            INSTANCE_ID=$(aws autoscaling describe-auto-scaling-groups \
+              --auto-scaling-group-names "$ASG_NAME" \
+              --query "AutoScalingGroups[0].Instances[0].InstanceId" \
+              --output text)
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
+            if [[ "$DESIRED" -ge 1 && "$INSTANCE_ID" != "None" ]]; then
+              echo "✅ ASG scaled up with instance $INSTANCE_ID."
+              break
+            fi
+            sleep 10
+          done
 
-      - name: Install dependencies
-        run: pip install boto3
+          echo "Checking CloudWatch logs for '[Worker] Done.'"
+          LOG_GROUP="/var/log/cloud-init-output.log"
+          INSTANCE_LOG=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID \
+            --query "Reservations[0].Instances[0].InstanceId" --output text)
 
-      - name: Destroy stack and clean up
-        run: python3 destroy.py
+          for i in {1..15}; do
+            OUTPUT=$(aws ec2 get-console-output --instance-id $INSTANCE_ID --output text || true)
+            echo "$OUTPUT" | grep '\[Worker\] Done\.' && echo "✅ Job completed successfully." && break
+            echo "Waiting for log confirmation..."
+            sleep 10
+          done
+
+          echo "Waiting for ASG to scale back to 0..."
+          for i in {1..30}; do
+            INSTANCE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
+              --auto-scaling-group-names "$ASG_NAME" \
+              --query "length(AutoScalingGroups[0].Instances)" \
+              --output text)
+
+            echo "Post-job check $i: Instances=$INSTANCE_COUNT"
+
+            if [[ "$INSTANCE_COUNT" -eq 0 ]]; then
+              echo "✅ EC2 instance has terminated and ASG scaled back to 0."
+              exit 0
+            fi
+            sleep 10
+          done
+
+          echo "❌ EC2 instance did not terminate in expected time."
+          exit 1
