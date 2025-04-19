@@ -1,37 +1,35 @@
-import json
 import boto3
 import os
 
 sqs = boto3.client('sqs')
-QUEUE_URL = os.environ['QUEUE_URL']
+asg = boto3.client('autoscaling')
 
 def lambda_handler(event, context):
-    try:
-        body = json.loads(event.get('body', '{}'))
-        wait = int(body.get('wait_seconds', 10))
+    queue_url = os.environ['QUEUE_URL']
+    asg_name = os.environ['ASG_NAME']
 
-        message = {
-            "wait_seconds": wait
-        }
+    # Check number of visible messages
+    attrs = sqs.get_queue_attributes(
+        QueueUrl=queue_url,
+        AttributeNames=['ApproximateNumberOfMessages']
+    )
+    message_count = int(attrs['Attributes']['ApproximateNumberOfMessages'])
 
-        response = sqs.send_message(
-            QueueUrl=QUEUE_URL,
-            MessageBody=json.dumps(message)
-        )
+    # Get current ASG desired capacity
+    group = asg.describe_auto_scaling_groups(
+        AutoScalingGroupNames=[asg_name]
+    )['AutoScalingGroups'][0]
+    current = group['DesiredCapacity']
 
-        return {
-            'statusCode': 200,
-            'body': json.dumps({
-                'message': 'Job enqueued',
-                'wait_seconds': wait,
-                'messageId': response['MessageId']
-            })
-        }
+    # Scale up/down based on message count
+    if message_count > 0 and current == 0:
+        print(f"Scaling up ASG {asg_name} to 1 (messages: {message_count})")
+        asg.set_desired_capacity(AutoScalingGroupName=asg_name, DesiredCapacity=1, HonorCooldown=False)
+    elif message_count == 0 and current > 0:
+        print(f"Scaling down ASG {asg_name} to 0 (no messages)")
+        asg.set_desired_capacity(AutoScalingGroupName=asg_name, DesiredCapacity=0, HonorCooldown=False)
 
-    except Exception as e:
-        return {
-            'statusCode': 500,
-            'body': json.dumps({
-                'error': str(e)
-            })
-        }
+    return {
+        'statusCode': 200,
+        'body': f'Messages: {message_count}, ASG Desired: {current}'
+    }

@@ -13,6 +13,7 @@ TEMPLATE_PATH = "template.yml"
 s3 = boto3.client("s3", region_name=REGION)
 cf = boto3.client("cloudformation", region_name=REGION)
 ec2 = boto3.client("ec2", region_name=REGION)
+logs = boto3.client("logs", region_name=REGION)
 
 
 def create_bucket_and_upload():
@@ -21,11 +22,11 @@ def create_bucket_and_upload():
     try:
         s3.create_bucket(Bucket=bucket_name)
     except botocore.exceptions.ClientError as e:
-        print(f"Failed to create bucket: {e}")
+        print(f"❌ Failed to create bucket: {e}")
         raise
 
     s3.upload_file(SCRIPT_PATH, bucket_name, SCRIPT_KEY)
-    print(f"Uploaded {SCRIPT_PATH} to s3://{bucket_name}/{SCRIPT_KEY}")
+    print(f"✅ Uploaded {SCRIPT_PATH} to s3://{bucket_name}/{SCRIPT_KEY}")
     return bucket_name
 
 
@@ -53,6 +54,13 @@ def deploy_stack(bucket, subnet):
                 {"ParameterKey": "SubnetId", "ParameterValue": subnet},
             ]
         )
+    except botocore.exceptions.ClientError as e:
+        if "AlreadyExistsException" in str(e):
+            print("⚠️ Stack already exists.")
+        else:
+            raise
+
+    try:
         waiter = cf.get_waiter("stack_create_complete")
         waiter.wait(StackName=STACK_NAME)
         print("✅ Stack created successfully.")
@@ -61,12 +69,6 @@ def deploy_stack(bucket, subnet):
         print(f"❌ Stack creation failed: {e}")
         log_stack_failure()
         return False
-    except botocore.exceptions.ClientError as e:
-        if "AlreadyExistsException" in str(e):
-            print("⚠️ Stack already exists.")
-        else:
-            print(f"❌ Stack creation error: {e}")
-        return False
 
 
 def log_stack_failure():
@@ -74,10 +76,10 @@ def log_stack_failure():
     try:
         events = cf.describe_stack_events(StackName=STACK_NAME)["StackEvents"]
         for event in events:
-            if event["ResourceStatus"] in ["ROLLBACK_IN_PROGRESS", "CREATE_FAILED"]:
+            if event["ResourceStatus"] in ["CREATE_FAILED", "ROLLBACK_IN_PROGRESS", "ROLLBACK_COMPLETE"]:
                 print(f"🔴 {event['LogicalResourceId']}: {event.get('ResourceStatusReason', 'No reason provided')}")
     except Exception as e:
-        print(f"⚠️ Could not fetch stack events: {e}")
+        print(f"⚠️ Could not retrieve stack events: {e}")
 
 
 def cleanup(bucket):
