@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Simple SQS worker stack with EC2 Auto Scaling
+Description: SQS Worker Stack with Lambda-based ASG auto-scaling
 
 Parameters:
   WorkerScriptBucket:
@@ -25,8 +25,7 @@ Resources:
         UserData:
           Fn::Base64: !Sub |
             #!/bin/bash
-            yum install -y python3
-            yum install -y awscli
+            yum install -y python3 aws-cli
             aws s3 cp s3://${WorkerScriptBucket}/${WorkerScriptKey} /home/ec2-user/worker.py
             python3 /home/ec2-user/worker.py
 
@@ -42,40 +41,92 @@ Resources:
       VPCZoneIdentifier:
         - !Ref SubnetId
 
-  ScaleUpPolicy:
-    Type: AWS::AutoScaling::ScalingPolicy
+  ASGScalerFunctionRole:
+    Type: AWS::IAM::Role
     Properties:
-      AutoScalingGroupName: !Ref AutoScalingGroup
-      PolicyType: SimpleScaling
-      AdjustmentType: ChangeInCapacity
-      ScalingAdjustment: 1
-      Cooldown: 60
+      RoleName: ASGScalerRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ASGScalingPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - autoscaling:SetDesiredCapacity
+                  - autoscaling:DescribeAutoScalingGroups
+                  - sqs:GetQueueAttributes
+                Resource: "*"
+              - Effect: Allow
+                Action: logs:*
+                Resource: "*"
 
-  ScaleDownPolicy:
-    Type: AWS::AutoScaling::ScalingPolicy
+  ASGScalerFunction:
+    Type: AWS::Lambda::Function
     Properties:
-      AutoScalingGroupName: !Ref AutoScalingGroup
-      PolicyType: SimpleScaling
-      AdjustmentType: ChangeInCapacity
-      ScalingAdjustment: -1
-      Cooldown: 300
+      FunctionName: ASGScalerFunction
+      Handler: index.lambda_handler
+      Role: !GetAtt ASGScalerFunctionRole.Arn
+      Runtime: python3.10
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import boto3
+          import os
 
-  QueueLengthAlarm:
-    Type: AWS::CloudWatch::Alarm
+          def lambda_handler(event, context):
+              sqs = boto3.client('sqs')
+              asg = boto3.client('autoscaling')
+              queue_url = os.environ['QUEUE_URL']
+              asg_name = os.environ['ASG_NAME']
+
+              attrs = sqs.get_queue_attributes(
+                  QueueUrl=queue_url,
+                  AttributeNames=['ApproximateNumberOfMessages']
+              )
+              message_count = int(attrs['Attributes']['ApproximateNumberOfMessages'])
+
+              group = asg.describe_auto_scaling_groups(
+                  AutoScalingGroupNames=[asg_name]
+              )['AutoScalingGroups'][0]
+
+              current = group['DesiredCapacity']
+
+              if message_count > 0 and current == 0:
+                  asg.set_desired_capacity(AutoScalingGroupName=asg_name, DesiredCapacity=1, HonorCooldown=False)
+              elif message_count == 0 and current > 0:
+                  asg.set_desired_capacity(AutoScalingGroupName=asg_name, DesiredCapacity=0, HonorCooldown=False)
+
+              return {
+                  'statusCode': 200,
+                  'body': f'Messages: {message_count}, CurrentCapacity: {current}'
+              }
+      Environment:
+        Variables:
+          QUEUE_URL: !Ref WorkerQueue
+          ASG_NAME: !Ref AutoScalingGroup
+
+  ASGScalerSchedule:
+    Type: AWS::Events::Rule
     Properties:
-      AlarmName: SQSMessageAlarm
-      Namespace: AWS/SQS
-      MetricName: ApproximateNumberOfMessagesVisible
-      Dimensions:
-        - Name: QueueName
-          Value: !GetAtt WorkerQueue.QueueName
-      Statistic: Sum
-      Period: 60
-      EvaluationPeriods: 1
-      Threshold: 1
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      AlarmActions:
-        - !Ref ScaleUpPolicy
+      ScheduleExpression: rate(1 minute)
+      Targets:
+        - Arn: !GetAtt ASGScalerFunction.Arn
+          Id: ASGScalerTarget
+
+  PermissionForEventsToInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ASGScalerFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ASGScalerSchedule.Arn
 
 Outputs:
   SQSQueueURL:
@@ -92,4 +143,3 @@ Outputs:
     Value: !Ref AutoScalingGroup
     Export:
       Name: !Sub "${AWS::StackName}-ASGName"
-
