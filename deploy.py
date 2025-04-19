@@ -55,11 +55,20 @@ def deploy_stack(bucket, subnet):
         )
     except botocore.exceptions.ClientError as e:
         if "AlreadyExistsException" in str(e):
-            print("⚠️ Stack already exists.")
+            print("⚠️ Stack already exists. Waiting for it to be ready...")
+            try:
+                waiter = cf.get_waiter("stack_create_complete")
+                waiter.wait(StackName=STACK_NAME)
+                print("✅ Existing stack is now ready.")
+                return True
+            except botocore.exceptions.WaiterError as we:
+                print(f"❌ Stack exists but is not in a ready state: {we}")
+                return False
         else:
             raise
 
     try:
+        print("⏳ Waiting for stack creation to complete...")
         waiter = cf.get_waiter("stack_create_complete")
         waiter.wait(StackName=STACK_NAME)
         print("✅ Stack created successfully.")
