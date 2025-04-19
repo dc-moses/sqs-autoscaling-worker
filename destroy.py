@@ -44,18 +44,23 @@ def deploy_stack():
 
     print("Deploying CloudFormation stack...")
 
+    # Use list_stacks instead of describe_stacks for reliability
     stack_exists = False
-    try:
-        stacks = cf.describe_stacks(StackName=STACK_NAME)
-        for stack in stacks["Stacks"]:
-            if stack["StackName"] == STACK_NAME:
-                stack_exists = True
-                break
-    except cf.exceptions.ClientError as e:
-        if "does not exist" in str(e):
-            stack_exists = False
-        else:
-            raise
+    stacks = cf.list_stacks(
+        StackStatusFilter=[
+            "CREATE_IN_PROGRESS", "CREATE_FAILED", "CREATE_COMPLETE",
+            "ROLLBACK_IN_PROGRESS", "ROLLBACK_FAILED", "ROLLBACK_COMPLETE",
+            "UPDATE_IN_PROGRESS", "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS",
+            "UPDATE_COMPLETE", "UPDATE_ROLLBACK_IN_PROGRESS",
+            "UPDATE_ROLLBACK_FAILED", "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS",
+            "UPDATE_ROLLBACK_COMPLETE"
+        ]
+    )["StackSummaries"]
+
+    for stack in stacks:
+        if stack["StackName"] == STACK_NAME:
+            stack_exists = True
+            break
 
     parameters = [
         {"ParameterKey": "WorkerScriptBucket", "ParameterValue": bucket},
