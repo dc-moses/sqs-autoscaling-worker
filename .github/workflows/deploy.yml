@@ -68,7 +68,7 @@ jobs:
             --output text)
           aws lambda update-function-configuration \
             --function-name $LAMBDA_NAME \
-            --environment "Variables={QUEUE_URL=$QUEUE_URL}"
+            --environment "Variables={\"QUEUE_URL\":\"$QUEUE_URL\"}"
 
       - name: Deploy API Gateway
         run: |
@@ -120,21 +120,30 @@ jobs:
           done
 
           echo "Waiting for ASG to scale back to 0..."
-          while true; do
+          for i in {1..60}; do
             INSTANCE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
               --auto-scaling-group-names "$ASG_NAME" \
               --query "length(AutoScalingGroups[0].Instances)" \
               --output text)
 
-            echo "Current instance count: $INSTANCE_COUNT"
+            echo "Post-job check $i: Instances=$INSTANCE_COUNT"
 
             if [ "$INSTANCE_COUNT" -eq 0 ]; then
               echo "✅ EC2 instance has terminated and ASG scaled back to 0."
               break
             fi
-
             sleep 10
           done
+
+          FINAL_COUNT=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names "$ASG_NAME" \
+            --query "length(AutoScalingGroups[0].Instances)" \
+            --output text)
+
+          if [ "$FINAL_COUNT" -gt 0 ]; then
+            echo "❌ EC2 instance did not terminate in expected time."
+            exit 1
+          fi
 
       - name: Delete worker bucket after stack creation
         if: always()
