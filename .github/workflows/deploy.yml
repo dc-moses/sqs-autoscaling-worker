@@ -67,7 +67,7 @@ jobs:
               --role arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-ci-role \
               --handler lambda_trigger.lambda_handler \
               --zip-file fileb://lambda.zip \
-              --environment Variables=QUEUE_URL=dummy-to-be-updated
+              --environment "{\"Variables\":{\"QUEUE_URL\":\"dummy-to-be-updated\"}}"
           fi
 
       - name: Update Lambda environment with real queue URL
@@ -79,7 +79,7 @@ jobs:
           echo "Updating Lambda with QUEUE_URL=$QUEUE_URL"
           aws lambda update-function-configuration \
             --function-name $LAMBDA_NAME \
-            --environment Variables=QUEUE_URL=$QUEUE_URL
+            --environment "{\"Variables\":{\"QUEUE_URL\":\"$QUEUE_URL\"}}"
 
       - name: Deploy API Gateway
         run: |
@@ -142,12 +142,3 @@ jobs:
           echo "🧹 Cleaning up CloudFormation stack and S3 bucket..."
           aws cloudformation delete-stack --stack-name SQSWorkerStack || true
           aws cloudformation wait stack-delete-complete --stack-name SQSWorkerStack || echo "⚠️ Stack deletion waiter timed out"
-
-          BUCKET_NAME=$(aws s3api list-buckets --query "Buckets[?starts_with(Name, 'worker-bucket-')].Name" --output text | head -n1)
-          if [ -n "$BUCKET_NAME" ]; then
-            aws s3 rm s3://$BUCKET_NAME --recursive || true
-            aws s3api delete-bucket --bucket $BUCKET_NAME || true
-            echo "✅ Bucket $BUCKET_NAME deleted."
-          else
-            echo "No matching worker bucket found."
-          fi
