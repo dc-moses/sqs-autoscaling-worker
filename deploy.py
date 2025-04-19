@@ -15,10 +15,14 @@ script_key = 'worker.py'
 
 def create_bucket_and_upload():
     print(f"Creating bucket: {bucket_name}")
-    s3.create_bucket(
-        Bucket=bucket_name,
-        CreateBucketConfiguration={'LocationConstraint': REGION}
-    )
+    if REGION == 'us-east-1':
+        s3.create_bucket(Bucket=bucket_name)
+    else:
+        s3.create_bucket(
+            Bucket=bucket_name,
+            CreateBucketConfiguration={'LocationConstraint': REGION}
+        )
+
     s3.upload_file(SCRIPT_FILE, bucket_name, script_key)
     print(f"Uploaded {SCRIPT_FILE} to s3://{bucket_name}/{script_key}")
 
