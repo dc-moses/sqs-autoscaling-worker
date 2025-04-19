@@ -1,6 +1,7 @@
 import boto3
 import time
 import uuid
+import botocore.exceptions
 
 cf = boto3.client('cloudformation')
 s3 = boto3.client('s3')
@@ -31,20 +32,47 @@ def deploy_stack():
         template_body = f.read()
 
     print("Deploying CloudFormation stack...")
-    cf.create_stack(
-        StackName=STACK_NAME,
-        TemplateBody=template_body,
-        Capabilities=['CAPABILITY_NAMED_IAM'],
-        Parameters=[
-            {'ParameterKey': 'WorkerScriptBucket', 'ParameterValue': bucket_name},
-            {'ParameterKey': 'WorkerScriptKey', 'ParameterValue': script_key},
-        ]
-    )
+    try:
+        cf.create_stack(
+            StackName=STACK_NAME,
+            TemplateBody=template_body,
+            Capabilities=['CAPABILITY_NAMED_IAM'],
+            Parameters=[
+                {'ParameterKey': 'WorkerScriptBucket', 'ParameterValue': bucket_name},
+                {'ParameterKey': 'WorkerScriptKey', 'ParameterValue': script_key},
+            ]
+        )
 
-    waiter = cf.get_waiter('stack_create_complete')
+        waiter = cf.get_waiter('stack_create_complete')
+        waiter.wait(StackName=STACK_NAME)
+        print("✅ Stack deployed successfully.")
+
+    except botocore.exceptions.WaiterError as e:
+        print("❌ Stack creation failed. Fetching failure events...")
+        events = cf.describe_stack_events(StackName=STACK_NAME)['StackEvents']
+        for event in events:
+            if event['ResourceStatus'] == 'CREATE_FAILED':
+                print(f"[ERROR] {event['LogicalResourceId']} ({event['ResourceType']}): {event['ResourceStatusReason']}")
+        raise e
+
+def cleanup_stack():
+    print(f"Cleaning up CloudFormation stack: {STACK_NAME}")
+    cf.delete_stack(StackName=STACK_NAME)
+    waiter = cf.get_waiter('stack_delete_complete')
     waiter.wait(StackName=STACK_NAME)
-    print("Stack deployed successfully.")
+    print("🧹 Stack deleted.")
 
 if __name__ == '__main__':
     create_bucket_and_upload()
-    deploy_stack()
+    try:
+        deploy_stack()
+    finally:
+        cleanup_stack()
+        try:
+            s3_resource = boto3.resource('s3')
+            bucket = s3_resource.Bucket(bucket_name)
+            bucket.objects.all().delete()
+            bucket.delete()
+            print(f"🧹 Deleted bucket: {bucket_name}")
+        except Exception as e:
+            print(f"⚠️ Failed to delete bucket: {e}")
