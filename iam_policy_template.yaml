@@ -15,7 +15,7 @@ Parameters:
     AllowedValues: [true, false]
   RoleName:
     Type: String
-    Default: deploy-role
+    Default: github-ci-role
 
 Resources:
 
@@ -53,4 +53,26 @@ Resources:
     Properties:
       RoleName: !Ref RoleName
       AssumeRolePolicyDocument:
-        Version
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: arn:aws:iam::319319364622:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: repo:dc-moses/sqs-autoscaling-worker:ref:refs/heads/main
+      ManagedPolicyArns:
+        - !Ref SQSWorkerPolicy
+
+Conditions:
+  CreateUserCondition: !Equals [!Ref CreateUser, true]
+  CreateRoleCondition: !Equals [!Ref CreateRole, true]
+
+Outputs:
+  LambdaFunctionName:
+    Description: Name of the Lambda function used by this deployment
+    Value: sqs-worker-lambda
+    Export:
+      Name: SQSWorkerLambdaName
