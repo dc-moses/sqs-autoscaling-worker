@@ -18,7 +18,7 @@ This system spins up an EC2 instance **only when a message is present** in the S
 - When a message arrives, it triggers the ASG to scale to 1
 - The EC2 instance downloads a worker script from S3
 - The script reads the job from the queue and sleeps for `wait_seconds`
-- Once the queue is empty and the cooldown period expires, EC2 scales down to 0.
+- Once the queue is empty and the cooldown period expires, EC2 scales down to 0
 
 ---
 
