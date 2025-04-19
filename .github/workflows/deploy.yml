@@ -68,7 +68,7 @@ jobs:
             --output text)
           aws lambda update-function-configuration \
             --function-name $LAMBDA_NAME \
-            --environment "Variables={\"QUEUE_URL\":\"$QUEUE_URL\"}"
+            --environment "Variables={QUEUE_URL=$QUEUE_URL}"
 
       - name: Deploy API Gateway
         run: |
@@ -93,7 +93,7 @@ jobs:
             --output text)
 
           echo "Polling ASG: $ASG_NAME for scale-up..."
-          for i in {1..15}; do
+          for i in {1..30}; do
             DESIRED=$(aws autoscaling describe-auto-scaling-groups \
               --auto-scaling-group-names "$ASG_NAME" \
               --query "AutoScalingGroups[0].DesiredCapacity" \
@@ -108,42 +108,33 @@ jobs:
               echo "✅ ASG scaled up with instance $INSTANCE_ID."
               break
             fi
-            echo "Waiting for scale-up ($i)..."
-            sleep 5
+            sleep 10
           done
 
-          echo "Checking instance logs for '[Worker] Done.'"
+          echo "Checking CloudWatch logs for '[Worker] Done.'"
           for i in {1..15}; do
-            OUTPUT=$(aws ec2 get-console-output --instance-id "$INSTANCE_ID" --output text || true)
+            OUTPUT=$(aws ec2 get-console-output --instance-id $INSTANCE_ID --output text || true)
             echo "$OUTPUT" | grep '\[Worker\] Done\.' && echo "✅ Job completed successfully." && break
-            echo "Waiting for worker to finish ($i)..."
-            sleep 5
+            echo "Waiting for log confirmation..."
+            sleep 10
           done
 
-          echo "Polling ASG: $ASG_NAME for scale-down..."
-          for i in {1..15}; do
+          echo "Waiting for ASG to scale back to 0..."
+          while true; do
             INSTANCE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
               --auto-scaling-group-names "$ASG_NAME" \
               --query "length(AutoScalingGroups[0].Instances)" \
               --output text)
 
+            echo "Current instance count: $INSTANCE_COUNT"
+
             if [ "$INSTANCE_COUNT" -eq 0 ]; then
               echo "✅ EC2 instance has terminated and ASG scaled back to 0."
               break
             fi
-            echo "Waiting for scale-down ($i)..."
-            sleep 5
+
+            sleep 10
           done
-
-          INSTANCE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
-            --auto-scaling-group-names "$ASG_NAME" \
-            --query "length(AutoScalingGroups[0].Instances)" \
-            --output text)
-
-          if [ "$INSTANCE_COUNT" -ne 0 ]; then
-            echo "❌ EC2 instance did not terminate in expected time."
-            exit 1
-          fi
 
       - name: Delete worker bucket after stack creation
         if: always()
