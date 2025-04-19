@@ -33,6 +33,13 @@ jobs:
       - name: Install dependencies
         run: pip install boto3
 
+      - name: Discover default subnet and write to env
+        id: subnet
+        run: |
+          SUBNET_ID=$(aws ec2 describe-subnets --filters Name=default-for-az,Values=true --query "Subnets[0].SubnetId" --output text)
+          echo "SUBNET_ID=$SUBNET_ID" >> $GITHUB_ENV
+          echo "Discovered subnet: $SUBNET_ID"
+
       - name: Deploy CloudFormation stack
         run: python3 deploy.py
 
@@ -59,10 +66,16 @@ jobs:
             --stack-name SQSWorkerStack \
             --query "Stacks[0].Outputs[?OutputKey=='SQSQueueURL'].OutputValue" \
             --output text)
+
           echo "Updating Lambda with QUEUE_URL=$QUEUE_URL"
           aws lambda update-function-configuration \
             --function-name $LAMBDA_NAME \
             --environment "Variables={\"QUEUE_URL\":\"$QUEUE_URL\"}"
+
+      - name: Deploy API Gateway
+        run: |
+          sed -i "s/YourLambdaFunctionName/$LAMBDA_NAME/g" deploy_api_gateway.py
+          python3 deploy_api_gateway.py
 
       - name: Send test job to SQS
         run: |
@@ -73,7 +86,7 @@ jobs:
           echo "Sending test job to queue: $QUEUE_URL"
           aws sqs send-message --queue-url "$QUEUE_URL" --message-body '{"wait_seconds":10}'
 
-      - name: Wait for ASG to scale up and back down
+      - name: Wait for ASG to scale to 1 and back to 0
         run: |
           set -e
           ASG_NAME=$(aws cloudformation describe-stack-resources \
@@ -83,50 +96,62 @@ jobs:
 
           echo "Polling ASG: $ASG_NAME for scale-up..."
           for i in {1..30}; do
+            DESIRED=$(aws autoscaling describe-auto-scaling-groups \
+              --auto-scaling-group-names "$ASG_NAME" \
+              --query "AutoScalingGroups[0].DesiredCapacity" \
+              --output text)
+
             INSTANCE_ID=$(aws autoscaling describe-auto-scaling-groups \
               --auto-scaling-group-names "$ASG_NAME" \
               --query "AutoScalingGroups[0].Instances[0].InstanceId" \
               --output text)
 
-            if [ "$INSTANCE_ID" != "None" ]; then
+            if [ "$DESIRED" -ge 1 ] && [ "$INSTANCE_ID" != "None" ]; then
               echo "✅ ASG scaled up with instance $INSTANCE_ID."
               break
             fi
             sleep 10
           done
 
-          echo "Waiting for instance termination..."
+          echo "Checking CloudWatch logs for '[Worker] Done.'"
+          for i in {1..15}; do
+            OUTPUT=$(aws ec2 get-console-output --instance-id $INSTANCE_ID --output text || true)
+            echo "$OUTPUT" | grep '\[Worker\] Done\.' && echo "✅ Job completed successfully." && break
+            echo "Waiting for log confirmation..."
+            sleep 10
+          done
+
+          echo "Waiting for ASG to scale back to 0..."
           for i in {1..30}; do
             INSTANCE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
               --auto-scaling-group-names "$ASG_NAME" \
               --query "length(AutoScalingGroups[0].Instances)" \
               --output text)
 
-            echo "Check $i: Current instance count: $INSTANCE_COUNT"
+            echo "Post-job check $i: Instances=$INSTANCE_COUNT"
 
             if [ "$INSTANCE_COUNT" -eq 0 ]; then
-              echo "✅ ASG scaled back down to 0."
+              echo "✅ EC2 instance has terminated and ASG scaled back to 0."
+              TERMINATION_REASON=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID \
+                --query "Reservations[0].Instances[0].StateTransitionReason" --output text)
+              echo "Termination reason: $TERMINATION_REASON"
               break
             fi
             sleep 10
           done
 
-          if [ "$INSTANCE_COUNT" -ne 0 ]; then
-            echo "❌ EC2 instance did not terminate in time."
-            exit 1
-          fi
+          echo "❌ EC2 instance did not terminate in expected time."
+          exit 1
 
-      - name: Cleanup worker bucket
+      - name: Delete worker bucket after stack creation
         if: always()
         run: |
-          BUCKET_NAME=$(aws s3api list-buckets \
-            --query "Buckets[?starts_with(Name, 'worker-bucket-')].Name" \
-            --output text | head -n1)
+          BUCKET_NAME=$(aws s3api list-buckets --query "Buckets[?starts_with(Name, 'worker-bucket-')].Name" --output text | head -n1)
           echo "Cleaning up bucket: $BUCKET_NAME"
           if [ -n "$BUCKET_NAME" ]; then
             aws s3 rm s3://$BUCKET_NAME --recursive || true
             aws s3api delete-bucket --bucket $BUCKET_NAME || true
             echo "✅ Bucket $BUCKET_NAME deleted."
           else
-            echo "No matching bucket found."
+            echo "No matching worker bucket found to clean up."
           fi
