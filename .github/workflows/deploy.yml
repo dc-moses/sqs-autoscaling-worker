@@ -79,7 +79,7 @@ jobs:
           echo "Updating Lambda with QUEUE_URL=$QUEUE_URL"
           aws lambda update-function-configuration \
             --function-name $LAMBDA_NAME \
-            --environment "Variables={\"QUEUE_URL\":\"$QUEUE_URL\"}"
+            --environment 'Variables={"QUEUE_URL":"'"$QUEUE_URL"'"}'
 
       - name: Deploy API Gateway
         run: |
