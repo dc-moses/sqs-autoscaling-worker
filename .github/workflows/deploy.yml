@@ -41,17 +41,7 @@ jobs:
           echo "Discovered subnet: $SUBNET_ID"
 
       - name: Deploy CloudFormation stack
-        run: |
-          python3 deploy.py || true
-          STACK_STATUS=$(aws cloudformation describe-stacks --stack-name SQSWorkerStack --query "Stacks[0].StackStatus" --output text || echo "DELETE")
-          if [ "$STACK_STATUS" = "ROLLBACK_COMPLETE" ] || [ "$STACK_STATUS" = "CREATE_FAILED" ]; then
-            echo "❌ Previous stack failed. Cleaning up..."
-            aws cloudformation delete-stack --stack-name SQSWorkerStack
-            sleep 10
-            aws cloudformation wait stack-delete-complete --stack-name SQSWorkerStack
-            echo "🧹 Failed stack deleted."
-            python3 deploy.py
-          fi
+        run: python3 deploy.py
 
       - name: Deploy or Create Lambda function
         run: |
@@ -67,7 +57,7 @@ jobs:
               --role arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-ci-role \
               --handler lambda_trigger.lambda_handler \
               --zip-file fileb://lambda.zip \
-              --environment Variables={QUEUE_URL=dummy-to-be-updated}
+              --environment "{\"Variables\":{\"QUEUE_URL\":\"dummy-to-be-updated\"}}"
           fi
 
       - name: Update Lambda environment with real queue URL
@@ -76,9 +66,11 @@ jobs:
             --stack-name SQSWorkerStack \
             --query "Stacks[0].Outputs[?OutputKey=='SQSQueueURL'].OutputValue" \
             --output text)
+          echo "Resolved QUEUE_URL=$QUEUE_URL"
+
           aws lambda update-function-configuration \
             --function-name $LAMBDA_NAME \
-            --environment "Variables={\"QUEUE_URL\":\"$QUEUE_URL\"}"
+            --environment "{\"Variables\":{\"QUEUE_URL\":\"$QUEUE_URL\"}}"
 
       - name: Deploy API Gateway
         run: |
@@ -140,6 +132,9 @@ jobs:
 
             if [ "$INSTANCE_COUNT" -eq 0 ]; then
               echo "✅ EC2 instance has terminated and ASG scaled back to 0."
+              TERMINATION_REASON=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID \
+                --query "Reservations[0].Instances[0].StateTransitionReason" --output text)
+              echo "Termination reason: $TERMINATION_REASON"
               break
             fi
             sleep 10
