@@ -79,7 +79,7 @@ jobs:
           echo "Updating Lambda with QUEUE_URL=$QUEUE_URL"
           aws lambda update-function-configuration \
             --function-name $LAMBDA_NAME \
-            --environment 'Variables={"QUEUE_URL":"'"$QUEUE_URL"'"}'
+            --environment Variables="{QUEUE_URL=$QUEUE_URL}"
 
       - name: Deploy API Gateway
         run: |
@@ -141,7 +141,7 @@ jobs:
         run: |
           echo "🧹 Cleaning up CloudFormation stack and S3 bucket..."
           aws cloudformation delete-stack --stack-name SQSWorkerStack || true
-          aws cloudformation wait stack_delete_complete --stack-name SQSWorkerStack || echo "⚠️ Stack deletion waiter timed out"
+          aws cloudformation wait stack-delete-complete --stack-name SQSWorkerStack || echo "⚠️ Stack deletion waiter timed out"
 
           BUCKET_NAME=$(aws s3api list-buckets --query "Buckets[?starts_with(Name, 'worker-bucket-')].Name" --output text | head -n1)
           if [ -n "$BUCKET_NAME" ]; then
