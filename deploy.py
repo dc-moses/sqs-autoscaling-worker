@@ -1,50 +1,78 @@
-import boto3
-import time
-import uuid
+AWSTemplateFormatVersion: '2010-09-09'
+Description: IAM policy and optional user/role setup for SQS worker deployment
 
-cf = boto3.client('cloudformation')
-s3 = boto3.client('s3')
+Parameters:
+  CreateUser:
+    Type: String
+    Default: false
+    AllowedValues: [true, false]
+  UserName:
+    Type: String
+    Default: deploy-user
+  CreateRole:
+    Type: String
+    Default: false
+    AllowedValues: [true, false]
+  RoleName:
+    Type: String
+    Default: github-ci-role
 
-STACK_NAME = 'SQSWorkerStack'
-TEMPLATE_FILE = 'template.yaml'
-SCRIPT_FILE = 'worker.py'
-REGION = 'us-east-1'
+Resources:
 
-bucket_name = f"worker-bucket-{uuid.uuid4().hex[:8]}"
-script_key = 'worker.py'
+  SQSWorkerPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Full permissions for deploying SQS worker stack
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - cloudformation:*
+              - ec2:*
+              - s3:*
+              - iam:*
+              - autoscaling:*
+              - cloudwatch:*
+              - sqs:*
+              - lambda:*
+              - apigateway:*
+            Resource: '*'
 
-def create_bucket_and_upload():
-    print(f"Creating bucket: {bucket_name}")
-    if REGION == 'us-east-1':
-        s3.create_bucket(Bucket=bucket_name)
-    else:
-        s3.create_bucket(
-            Bucket=bucket_name,
-            CreateBucketConfiguration={'LocationConstraint': REGION}
-        )
+  DeployUser:
+    Type: AWS::IAM::User
+    Condition: CreateUserCondition
+    Properties:
+      UserName: !Ref UserName
+      ManagedPolicyArns:
+        - !Ref SQSWorkerPolicy
 
-    s3.upload_file(SCRIPT_FILE, bucket_name, script_key)
-    print(f"Uploaded {SCRIPT_FILE} to s3://{bucket_name}/{script_key}")
+  DeployRole:
+    Type: AWS::IAM::Role
+    Condition: CreateRoleCondition
+    Properties:
+      RoleName: !Ref RoleName
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: arn:aws:iam::319319364622:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: repo:YOUR_USERNAME/YOUR_REPO:ref:refs/heads/main
+      ManagedPolicyArns:
+        - !Ref SQSWorkerPolicy
 
-def deploy_stack():
-    with open(TEMPLATE_FILE) as f:
-        template_body = f.read()
+Conditions:
+  CreateUserCondition: !Equals [!Ref CreateUser, true]
+  CreateRoleCondition: !Equals [!Ref CreateRole, true]
 
-    print("Deploying CloudFormation stack...")
-    cf.create_stack(
-        StackName=STACK_NAME,
-        TemplateBody=template_body,
-        Capabilities=['CAPABILITY_NAMED_IAM'],
-        Parameters=[
-            {'ParameterKey': 'WorkerScriptBucket', 'ParameterValue': bucket_name},
-            {'ParameterKey': 'WorkerScriptKey', 'ParameterValue': script_key},
-        ]
-    )
-
-    waiter = cf.get_waiter('stack_create_complete')
-    waiter.wait(StackName=STACK_NAME)
-    print("Stack deployed successfully.")
-
-if __name__ == '__main__':
-    create_bucket_and_upload()
-    deploy_stack()
+Outputs:
+  LambdaFunctionName:
+    Description: Name of the Lambda function used by this deployment
+    Value: sqs-worker-lambda
+    Export:
+      Name: !Sub "${AWS::StackName}-LambdaName"
