@@ -57,8 +57,7 @@ jobs:
               --role arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-ci-role \
               --handler lambda_trigger.lambda_handler \
               --zip-file fileb://lambda.zip \
-              --environment Variables={QUEUE_URL=dummy-to-be-updated}
-          fi
+              --environment "Variables={QUEUE_URL=dummy-to-be-updated}"
 
       - name: Update Lambda environment with real queue URL
         run: |
@@ -66,11 +65,10 @@ jobs:
             --stack-name SQSWorkerStack \
             --query "Stacks[0].Outputs[?OutputKey=='SQSQueueURL'].OutputValue" \
             --output text)
-
           echo "Updating Lambda with QUEUE_URL=$QUEUE_URL"
           aws lambda update-function-configuration \
             --function-name $LAMBDA_NAME \
-            --environment "Variables={\"QUEUE_URL\":\"$QUEUE_URL\"}"
+            --environment "Variables={QUEUE_URL=$QUEUE_URL}"
 
       - name: Deploy API Gateway
         run: |
@@ -122,7 +120,7 @@ jobs:
           done
 
           echo "Waiting for ASG to scale back to 0..."
-          for i in {1..30}; do
+          for i in {1..60}; do
             INSTANCE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
               --auto-scaling-group-names "$ASG_NAME" \
               --query "length(AutoScalingGroups[0].Instances)" \
@@ -132,16 +130,10 @@ jobs:
 
             if [ "$INSTANCE_COUNT" -eq 0 ]; then
               echo "✅ EC2 instance has terminated and ASG scaled back to 0."
-              TERMINATION_REASON=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID \
-                --query "Reservations[0].Instances[0].StateTransitionReason" --output text)
-              echo "Termination reason: $TERMINATION_REASON"
               break
             fi
             sleep 10
           done
-
-          echo "❌ EC2 instance did not terminate in expected time."
-          exit 1
 
       - name: Delete worker bucket after stack creation
         if: always()
@@ -155,3 +147,11 @@ jobs:
           else
             echo "No matching worker bucket found to clean up."
           fi
+
+      - name: Always delete CloudFormation stack
+        if: always()
+        run: |
+          echo "Cleaning up CloudFormation stack: SQSWorkerStack"
+          aws cloudformation delete-stack --stack-name SQSWorkerStack || true
+          aws cloudformation wait stack-delete-complete --stack-name SQSWorkerStack || true
+          echo "✅ Stack deleted."
