@@ -6,6 +6,8 @@ Parameters:
     Type: String
   WorkerScriptKey:
     Type: String
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
 
 Resources:
   WorkerQueue:
@@ -37,7 +39,7 @@ Resources:
       MaxSize: 1
       DesiredCapacity: 0
       VPCZoneIdentifier:
-        - subnet-0123456789abcdef0  # Replace with real subnet ID
+        - !Ref SubnetId
 
   ScaleUpPolicy:
     Type: AWS::AutoScaling::ScalingPolicy

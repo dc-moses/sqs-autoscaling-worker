@@ -33,6 +33,13 @@ jobs:
       - name: Install dependencies
         run: pip install boto3
 
+      - name: Discover default subnet and write to env
+        id: subnet
+        run: |
+          SUBNET_ID=$(aws ec2 describe-subnets --filters Name=default-for-az,Values=true --query "Subnets[0].SubnetId" --output text)
+          echo "SUBNET_ID=$SUBNET_ID" >> $GITHUB_ENV
+          echo "Discovered subnet: $SUBNET_ID"
+
       - name: Deploy CloudFormation stack
         run: python3 deploy.py
 
