@@ -1,46 +1,109 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: IAM policy and role for GitHub Actions and Lambda deployment
+Description: Simple SQS worker stack with EC2 Auto Scaling
+
+Parameters:
+  WorkerScriptBucket:
+    Type: String
+  WorkerScriptKey:
+    Type: String
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
 
 Resources:
-  SQSWorkerPolicy:
-    Type: AWS::IAM::ManagedPolicy
+  WorkerQueue:
+    Type: AWS::SQS::Queue
     Properties:
-      Description: Full permissions for deploying SQS worker stack
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Action:
-              - cloudformation:*
-              - ec2:*
-              - s3:*
-              - iam:*
-              - autoscaling:*
-              - cloudwatch:*
-              - sqs:*
-              - lambda:*
-              - apigateway:*
-              - "ssm:GetParameters"
+      QueueName: worker-queue
 
-            Resource: "*"
-
-  DeployRole:
-    Type: AWS::IAM::Role
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
     Properties:
-      RoleName: github-ci-role
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-          - Effect: Allow
-            Principal:
-              Federated: arn:aws:iam::319319364622:oidc-provider/token.actions.githubusercontent.com
-            Action: sts:AssumeRoleWithWebIdentity
-            Condition:
-              StringLike:
-                token.actions.githubusercontent.com:sub: "repo:dc-moses/sqs-autoscaling-worker:*"
-      ManagedPolicyArns:
-        - !Ref SQSWorkerPolicy
+      LaunchTemplateData:
+        ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2}}"
+        InstanceType: t2.micro
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            yum install -y python3 awscli
+            aws s3 cp s3://${WorkerScriptBucket}/${WorkerScriptKey} /home/ec2-user/worker.py
+            python3 /home/ec2-user/worker.py
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: 0
+      MaxSize: 1
+      DesiredCapacity: 0
+      VPCZoneIdentifier:
+        - !Ref SubnetId
+
+  ScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: SimpleScaling
+      AdjustmentType: ChangeInCapacity
+      ScalingAdjustment: 1
+      Cooldown: 30
+
+  ScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: SimpleScaling
+      AdjustmentType: ChangeInCapacity
+      ScalingAdjustment: -1
+      Cooldown: 30
+
+  QueueLengthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: SQSMessageAlarm
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt WorkerQueue.QueueName
+      Statistic: Sum
+      Period: 30
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref ScaleUpPolicy
+
+  QueueEmptyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: SQSQueueEmpty
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt WorkerQueue.QueueName
+      Statistic: Sum
+      Period: 30
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: LessThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref ScaleDownPolicy
+
+Outputs:
+  SQSQueueURL:
+    Value: !Ref WorkerQueue
+    Export:
+      Name: !Sub "${AWS::StackName}-QueueURL"
+
+  LaunchTemplateId:
+    Value: !Ref LaunchTemplate
+    Export:
+      Name: !Sub "${AWS::StackName}-LaunchTemplateId"
+
+  AutoScalingGroupName:
+    Value: !Ref AutoScalingGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-ASGName"

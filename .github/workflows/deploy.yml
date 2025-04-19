@@ -57,7 +57,7 @@ jobs:
               --role arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-ci-role \
               --handler lambda_trigger.lambda_handler \
               --zip-file fileb://lambda.zip \
-              --environment "{\"Variables\":{\"QUEUE_URL\":\"dummy-to-be-updated\"}}"
+              --environment Variables={QUEUE_URL=dummy-to-be-updated}
           fi
 
       - name: Update Lambda environment with real queue URL
@@ -66,11 +66,9 @@ jobs:
             --stack-name SQSWorkerStack \
             --query "Stacks[0].Outputs[?OutputKey=='SQSQueueURL'].OutputValue" \
             --output text)
-          echo "Resolved QUEUE_URL=$QUEUE_URL"
-
           aws lambda update-function-configuration \
             --function-name $LAMBDA_NAME \
-            --environment "{\"Variables\":{\"QUEUE_URL\":\"$QUEUE_URL\"}}"
+            --environment "Variables={\"QUEUE_URL\":\"$QUEUE_URL\"}"
 
       - name: Deploy API Gateway
         run: |
@@ -95,7 +93,7 @@ jobs:
             --output text)
 
           echo "Polling ASG: $ASG_NAME for scale-up..."
-          for i in {1..30}; do
+          for i in {1..15}; do
             DESIRED=$(aws autoscaling describe-auto-scaling-groups \
               --auto-scaling-group-names "$ASG_NAME" \
               --query "AutoScalingGroups[0].DesiredCapacity" \
@@ -110,38 +108,42 @@ jobs:
               echo "✅ ASG scaled up with instance $INSTANCE_ID."
               break
             fi
-            sleep 10
+            echo "Waiting for scale-up ($i)..."
+            sleep 5
           done
 
-          echo "Checking CloudWatch logs for '[Worker] Done.'"
+          echo "Checking instance logs for '[Worker] Done.'"
           for i in {1..15}; do
-            OUTPUT=$(aws ec2 get-console-output --instance-id $INSTANCE_ID --output text || true)
+            OUTPUT=$(aws ec2 get-console-output --instance-id "$INSTANCE_ID" --output text || true)
             echo "$OUTPUT" | grep '\[Worker\] Done\.' && echo "✅ Job completed successfully." && break
-            echo "Waiting for log confirmation..."
-            sleep 10
+            echo "Waiting for worker to finish ($i)..."
+            sleep 5
           done
 
-          echo "Waiting for ASG to scale back to 0..."
-          for i in {1..30}; do
+          echo "Polling ASG: $ASG_NAME for scale-down..."
+          for i in {1..15}; do
             INSTANCE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
               --auto-scaling-group-names "$ASG_NAME" \
               --query "length(AutoScalingGroups[0].Instances)" \
               --output text)
 
-            echo "Post-job check $i: Instances=$INSTANCE_COUNT"
-
             if [ "$INSTANCE_COUNT" -eq 0 ]; then
               echo "✅ EC2 instance has terminated and ASG scaled back to 0."
-              TERMINATION_REASON=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID \
-                --query "Reservations[0].Instances[0].StateTransitionReason" --output text)
-              echo "Termination reason: $TERMINATION_REASON"
               break
             fi
-            sleep 10
+            echo "Waiting for scale-down ($i)..."
+            sleep 5
           done
 
-          echo "❌ EC2 instance did not terminate in expected time."
-          exit 1
+          INSTANCE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names "$ASG_NAME" \
+            --query "length(AutoScalingGroups[0].Instances)" \
+            --output text)
+
+          if [ "$INSTANCE_COUNT" -ne 0 ]; then
+            echo "❌ EC2 instance did not terminate in expected time."
+            exit 1
+          fi
 
       - name: Delete worker bucket after stack creation
         if: always()
