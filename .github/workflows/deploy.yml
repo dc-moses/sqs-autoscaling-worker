@@ -57,7 +57,7 @@ jobs:
               --role arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-ci-role \
               --handler lambda_trigger.lambda_handler \
               --zip-file fileb://lambda.zip \
-              --environment Variables={QUEUE_URL=dummy-to-be-updated}
+              --environment "Variables={QUEUE_URL=dummy-to-be-updated}"
           fi
 
       - name: Update Lambda environment with real queue URL
@@ -66,9 +66,10 @@ jobs:
             --stack-name SQSWorkerStack \
             --query "Stacks[0].Outputs[?OutputKey=='SQSQueueURL'].OutputValue" \
             --output text)
+          echo "Updating Lambda with QUEUE_URL: $QUEUE_URL"
           aws lambda update-function-configuration \
             --function-name $LAMBDA_NAME \
-            --environment Variables="{\"QUEUE_URL\":\"$QUEUE_URL\"}"
+            --environment "Variables={QUEUE_URL=$QUEUE_URL}"
 
       - name: Deploy API Gateway
         run: |
@@ -112,10 +113,6 @@ jobs:
           done
 
           echo "Checking CloudWatch logs for '[Worker] Done.'"
-          LOG_GROUP="/var/log/cloud-init-output.log"
-          INSTANCE_LOG=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID \
-            --query "Reservations[0].Instances[0].InstanceId" --output text)
-
           for i in {1..15}; do
             OUTPUT=$(aws ec2 get-console-output --instance-id $INSTANCE_ID --output text || true)
             echo "$OUTPUT" | grep '\[Worker\] Done\.' && echo "✅ Job completed successfully." && break
@@ -134,9 +131,6 @@ jobs:
 
             if [ "$INSTANCE_COUNT" -eq 0 ]; then
               echo "✅ EC2 instance has terminated and ASG scaled back to 0."
-              TERMINATION_REASON=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID \
-                --query "Reservations[0].Instances[0].StateTransitionReason" --output text)
-              echo "Termination reason: $TERMINATION_REASON"
               break
             fi
             sleep 10
