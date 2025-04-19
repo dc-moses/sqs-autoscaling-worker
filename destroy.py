@@ -1,99 +1,98 @@
 import boto3
+import botocore
 import time
 import uuid
-import traceback
 import os
+import sys
 
 STACK_NAME = "SQSWorkerStack"
-SCRIPT_KEY = "worker.py"
+TEMPLATE_FILE = "template.yml"
 REGION = "us-east-1"
-cf = boto3.client("cloudformation", region_name=REGION)
-s3 = boto3.client("s3", region_name=REGION)
-ec2 = boto3.client("ec2", region_name=REGION)
+SCRIPT_KEY = "worker.py"
+
+def generate_bucket_name():
+    return f"worker-bucket-{uuid.uuid4().hex[:8]}"
+
+def get_default_subnet():
+    ec2 = boto3.client("ec2", region_name=REGION)
+    subnets = ec2.describe_subnets(Filters=[{"Name": "default-for-az", "Values": ["true"]}])
+    if not subnets["Subnets"]:
+        raise Exception("No default subnet found.")
+    return subnets["Subnets"][0]["SubnetId"]
 
 def create_bucket_and_upload():
-    suffix = str(uuid.uuid4())[:8]
-    bucket_name = f"worker-bucket-{suffix}"
+    s3 = boto3.client("s3", region_name=REGION)
+    bucket_name = generate_bucket_name()
     print(f"Creating bucket: {bucket_name}")
+    
     s3.create_bucket(
         Bucket=bucket_name,
         CreateBucketConfiguration={"LocationConstraint": REGION}
     )
-    s3.upload_file(SCRIPT_KEY, bucket_name, SCRIPT_KEY)
-    print(f"Uploaded {SCRIPT_KEY} to s3://{bucket_name}/{SCRIPT_KEY}")
+
+    s3.upload_file("worker.py", bucket_name, SCRIPT_KEY)
+    print(f"Uploaded worker.py to s3://{bucket_name}/{SCRIPT_KEY}")
     return bucket_name
 
-def get_default_subnet():
-    subnets = ec2.describe_subnets(
-        Filters=[{"Name": "default-for-az", "Values": ["true"]}]
-    )["Subnets"]
-    if not subnets:
-        raise Exception("No default subnet found.")
-    subnet_id = subnets[0]["SubnetId"]
-    print(f"Using subnet: {subnet_id}")
-    return subnet_id
-
 def deploy_stack():
-    bucket = create_bucket_and_upload()
-    subnet_id = get_default_subnet()
-
-    with open("template.yml") as f:
-        template_body = f.read()
-
-    print("Deploying CloudFormation stack...")
-
-    parameters = [
-        {"ParameterKey": "WorkerScriptBucket", "ParameterValue": bucket},
-        {"ParameterKey": "WorkerScriptKey", "ParameterValue": SCRIPT_KEY},
-        {"ParameterKey": "SubnetId", "ParameterValue": subnet_id},
-    ]
-
+    cf = boto3.client("cloudformation", region_name=REGION)
     try:
-        try:
-            cf.describe_stacks(StackName=STACK_NAME)
-            stack_exists = True
-            print(f"Stack {STACK_NAME} exists — updating.")
-        except cf.exceptions.ClientError as e:
-            if "does not exist" in str(e):
-                stack_exists = False
-                print(f"Stack {STACK_NAME} does not exist — creating.")
-            else:
-                raise
+        with open(TEMPLATE_FILE) as f:
+            template_body = f.read()
 
-        if stack_exists:
-            cf.update_stack(
-                StackName=STACK_NAME,
-                TemplateBody=template_body,
-                Capabilities=["CAPABILITY_NAMED_IAM"],
-                Parameters=parameters
-            )
-            waiter = cf.get_waiter("stack_update_complete")
-        else:
-            cf.create_stack(
-                StackName=STACK_NAME,
-                TemplateBody=template_body,
-                Capabilities=["CAPABILITY_NAMED_IAM"],
-                Parameters=parameters,
-                OnFailure="DO_NOTHING"
-            )
-            waiter = cf.get_waiter("stack_create_complete")
+        bucket = create_bucket_and_upload()
+        subnet_id = get_default_subnet()
+        print(f"Using subnet: {subnet_id}")
 
+        print("Deploying CloudFormation stack...")
+        cf.create_stack(
+            StackName=STACK_NAME,
+            TemplateBody=template_body,
+            Parameters=[
+                {"ParameterKey": "WorkerScriptBucket", "ParameterValue": bucket},
+                {"ParameterKey": "WorkerScriptKey", "ParameterValue": SCRIPT_KEY},
+                {"ParameterKey": "SubnetId", "ParameterValue": subnet_id}
+            ],
+            Capabilities=["CAPABILITY_NAMED_IAM"]
+        )
+
+        waiter = cf.get_waiter("stack_create_complete")
         waiter.wait(StackName=STACK_NAME)
-        print("✅ Stack deployed successfully.")
-        return bucket
+        print("✅ Stack created successfully.")
 
-    except Exception as e:
-        print("❌ Stack deployment failed. Fetching failure events...")
+    except botocore.exceptions.WaiterError as e:
+        print("❌ Stack creation failed. Fetching failure events...")
+
         try:
             events = cf.describe_stack_events(StackName=STACK_NAME)["StackEvents"]
-            for event in events[:5]:
-                print("Error:", event.get("ResourceStatusReason"))
-        except Exception as nested:
-            print("⚠️ Failed to retrieve stack events:", nested)
+            for event in events:
+                if event["ResourceStatus"] in ["CREATE_FAILED", "ROLLBACK_IN_PROGRESS", "ROLLBACK_COMPLETE"]:
+                    print(f"Error: {event['LogicalResourceId']} ({event['ResourceType']}): {event.get('ResourceStatusReason', '')}")
+        except Exception as event_err:
+            print(f"Could not fetch stack events: {event_err}")
 
-        print("🚫 Skipping cleanup so you can inspect the failed stack.")
-        traceback.print_exc()
-        exit(1)
+        print("Cleaning up due to failure...")
+
+        try:
+            print(f"Deleting CloudFormation stack: {STACK_NAME}")
+            cf.delete_stack(StackName=STACK_NAME)
+            waiter = cf.get_waiter("stack_delete_complete")
+            waiter.wait(StackName=STACK_NAME)
+            print("🧹 Stack deleted.")
+        except Exception as stack_err:
+            print(f"Failed to delete stack: {stack_err}")
+
+        try:
+            print(f"Deleting S3 bucket: {bucket}")
+            s3 = boto3.resource("s3", region_name=REGION)
+            bucket_resource = s3.Bucket(bucket)
+            bucket_resource.objects.all().delete()
+            bucket_resource.delete()
+            print(f"🧹 Bucket {bucket} deleted.")
+        except Exception as bucket_err:
+            print(f"Failed to delete bucket: {bucket_err}")
+
+        sys.exit(1)
 
 if __name__ == "__main__":
     deploy_stack()
