@@ -27,7 +27,7 @@ Resources:
             #!/bin/bash
             yum install -y python3 aws-cli
             aws s3 cp s3://${WorkerScriptBucket}/${WorkerScriptKey} /home/ec2-user/worker.py
-            QUEUE_URL=${WorkerQueue}
+            QUEUE_URL=$(aws cloudformation describe-stacks --stack-name SQSWorkerStack --query "Stacks[0].Outputs[?OutputKey=='SQSQueueURL'].OutputValue" --output text)
             export QUEUE_URL
             python3 /home/ec2-user/worker.py
 
@@ -42,7 +42,6 @@ Resources:
       DesiredCapacity: 0
       VPCZoneIdentifier:
         - !Ref SubnetId
-      Cooldown: 30
 
   ASGScalerFunctionRole:
     Type: AWS::IAM::Role
@@ -68,9 +67,7 @@ Resources:
                 Resource: "*"
               - Effect: Allow
                 Action:
-                  - logs:CreateLogGroup
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
+                  - logs:*
                 Resource: "*"
 
   ASGScalerFunction:
@@ -80,12 +77,72 @@ Resources:
       Handler: lambda_trigger.lambda_handler
       Role: !GetAtt ASGScalerFunctionRole.Arn
       Runtime: python3.10
-      Timeout: 30
+      Timeout: 30 # ← Updated from default to 30s
+      MemorySize: 128
       Code:
         ZipFile: |
-          # Placeholder, actual code will be deployed manually via GitHub Actions
+          import boto3
+          import os
+          import time
+          import botocore.exceptions
+
           def lambda_handler(event, context):
-              return {"statusCode": 200, "body": "Placeholder"}
+              sqs = boto3.client("sqs")
+              asg = boto3.client("autoscaling")
+
+              queue_url = os.environ["QUEUE_URL"]
+              asg_name = os.environ["ASG_NAME"]
+
+              attrs = sqs.get_queue_attributes(
+                  QueueUrl=queue_url,
+                  AttributeNames=[
+                      "ApproximateNumberOfMessages",
+                      "ApproximateNumberOfMessagesNotVisible"
+                  ]
+              )
+
+              visible = int(attrs["Attributes"]["ApproximateNumberOfMessages"])
+              not_visible = int(attrs["Attributes"]["ApproximateNumberOfMessagesNotVisible"])
+              total = visible + not_visible
+
+              print(f"[SQS] Visible: {visible}, NotVisible: {not_visible}, Total: {total}")
+
+              group = asg.describe_auto_scaling_groups(
+                  AutoScalingGroupNames=[asg_name]
+              )["AutoScalingGroups"][0]
+
+              current_capacity = group["DesiredCapacity"]
+              print(f"[ASG] Current desired capacity: {current_capacity}")
+
+              if total > 0 and current_capacity == 0:
+                  print(f"[ASG] Scaling UP {asg_name} to 1")
+                  asg.set_desired_capacity(
+                      AutoScalingGroupName=asg_name,
+                      DesiredCapacity=1,
+                      HonorCooldown=False
+                  )
+              elif total == 0 and current_capacity > 0:
+                  print(f"[ASG] Attempting to scale DOWN {asg_name} to 0")
+                  for attempt in range(3):
+                      try:
+                          asg.set_desired_capacity(
+                              AutoScalingGroupName=asg_name,
+                              DesiredCapacity=0,
+                              HonorCooldown=False
+                          )
+                          print(f"[ASG] Scale-down request successful on attempt {attempt + 1}")
+                          break
+                      except botocore.exceptions.ClientError as e:
+                          print(f"[ASG] Attempt {attempt + 1} failed to scale down: {e}")
+                          if attempt < 2:
+                              time.sleep(5)
+                          else:
+                              print("[ASG] All scale-down attempts failed.")
+
+              return {
+                  "statusCode": 200,
+                  "body": f"Queue={total}, DesiredCapacity={current_capacity}"
+              }
       Environment:
         Variables:
           QUEUE_URL: !Ref WorkerQueue
