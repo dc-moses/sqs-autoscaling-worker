@@ -67,7 +67,7 @@ jobs:
               --role arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-ci-role \
               --handler lambda_trigger.lambda_handler \
               --zip-file fileb://lambda.zip \
-              --environment '{"Variables":{"QUEUE_URL":"dummy-to-be-updated"}}'
+              --environment Variables="{QUEUE_URL=dummy-to-be-updated}"
           fi
 
       - name: Update Lambda environment with real queue URL
@@ -79,7 +79,7 @@ jobs:
           echo "Updating Lambda with QUEUE_URL=$QUEUE_URL"
           aws lambda update-function-configuration \
             --function-name $LAMBDA_NAME \
-            --environment "{\"Variables\":{\"QUEUE_URL\":\"$QUEUE_URL\"}}"
+            --environment "{\"Variables\": {\"QUEUE_URL\": \"$QUEUE_URL\"}}"
 
       - name: Deploy API Gateway
         run: |
@@ -94,6 +94,47 @@ jobs:
             --output text)
           echo "Sending test job to queue: $QUEUE_URL"
           aws sqs send-message --queue-url "$QUEUE_URL" --message-body '{"wait_seconds":10}'
+
+      - name: Wait for ASG to scale up and down
+        run: |
+          ASG_NAME=$(aws cloudformation describe-stack-resources \
+            --stack-name SQSWorkerStack \
+            --query "StackResources[?ResourceType=='AWS::AutoScaling::AutoScalingGroup'].PhysicalResourceId" \
+            --output text)
+
+          echo "Polling ASG: $ASG_NAME for scale-up..."
+          for i in {1..40}; do
+            DESIRED=$(aws autoscaling describe-auto-scaling-groups \
+              --auto-scaling-group-names "$ASG_NAME" \
+              --query "AutoScalingGroups[0].DesiredCapacity" \
+              --output text)
+
+            INSTANCE_ID=$(aws autoscaling describe-auto-scaling-groups \
+              --auto-scaling-group-names "$ASG_NAME" \
+              --query "AutoScalingGroups[0].Instances[0].InstanceId" \
+              --output text)
+
+            if [ "$DESIRED" -ge 1 ] && [ "$INSTANCE_ID" != "None" ]; then
+              echo "✅ ASG scaled up with instance $INSTANCE_ID."
+              break
+            fi
+            sleep 30
+          done
+
+          echo "Waiting for ASG to scale down to 0..."
+          for i in {1..40}; do
+            INSTANCE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
+              --auto-scaling-group-names "$ASG_NAME" \
+              --query "length(AutoScalingGroups[0].Instances)" \
+              --output text)
+
+            echo "Poll $i: Current instance count = $INSTANCE_COUNT"
+            if [ "$INSTANCE_COUNT" -eq 0 ]; then
+              echo "✅ EC2 instance has terminated and ASG scaled down to 0."
+              break
+            fi
+            sleep 30
+          done
 
       - name: Cleanup CloudFormation stack and S3 bucket
         if: always()
