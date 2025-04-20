@@ -43,32 +43,53 @@ def deploy_stack(bucket, subnet):
     with open(TEMPLATE_PATH) as f:
         template_body = f.read()
 
+    stack_exists = False
     try:
-        cf.create_stack(
-            StackName=STACK_NAME,
-            TemplateBody=template_body,
-            Capabilities=["CAPABILITY_NAMED_IAM"],
-            Parameters=[
-                {"ParameterKey": "WorkerScriptBucket", "ParameterValue": bucket},
-                {"ParameterKey": "WorkerScriptKey", "ParameterValue": SCRIPT_KEY},
-                {"ParameterKey": "SubnetId", "ParameterValue": subnet}
-            ]
-        )
+        cf.describe_stacks(StackName=STACK_NAME)
+        stack_exists = True
+        print("ℹ️ Stack exists. Updating...")
     except botocore.exceptions.ClientError as e:
-        if "AlreadyExistsException" in str(e):
-            print("⚠️ Stack already exists.")
+        if "does not exist" in str(e):
+            print("ℹ️ Stack does not exist. Creating...")
         else:
             raise
 
     try:
-        waiter = cf.get_waiter("stack_create_complete")
+        parameters = [
+            {"ParameterKey": "WorkerScriptBucket", "ParameterValue": bucket},
+            {"ParameterKey": "WorkerScriptKey", "ParameterValue": SCRIPT_KEY},
+            {"ParameterKey": "SubnetId", "ParameterValue": subnet}
+        ]
+
+        if stack_exists:
+            cf.update_stack(
+                StackName=STACK_NAME,
+                TemplateBody=template_body,
+                Capabilities=["CAPABILITY_NAMED_IAM"],
+                Parameters=parameters
+            )
+            waiter = cf.get_waiter("stack_update_complete")
+        else:
+            cf.create_stack(
+                StackName=STACK_NAME,
+                TemplateBody=template_body,
+                Capabilities=["CAPABILITY_NAMED_IAM"],
+                Parameters=parameters
+            )
+            waiter = cf.get_waiter("stack_create_complete")
+
         waiter.wait(StackName=STACK_NAME)
-        print("✅ Stack created successfully.")
+        print("✅ Stack deployed successfully.")
         return True
-    except botocore.exceptions.WaiterError as e:
-        print(f"❌ Stack creation failed: {e}")
-        log_stack_failure()
-        return False
+
+    except botocore.exceptions.ClientError as e:
+        if "No updates are to be performed" in str(e):
+            print("⚠️ No updates were necessary.")
+            return True
+        else:
+            print(f"❌ Stack deployment error: {e}")
+            log_stack_failure()
+            return False
 
 
 def get_stack_output(output_key):
@@ -121,6 +142,5 @@ if __name__ == "__main__":
         cleanup(bucket_name)
         exit(1)
 
-    # Optional logging to confirm deployment outputs
     queue_url = get_stack_output("SQSQueueURL")
     print(f"ℹ️ SQS Queue URL: {queue_url}")
