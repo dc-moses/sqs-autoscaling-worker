@@ -12,7 +12,10 @@ def lambda_handler(event, context):
 
     attrs = sqs.get_queue_attributes(
         QueueUrl=queue_url,
-        AttributeNames=["ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible"]
+        AttributeNames=[
+            "ApproximateNumberOfMessages",
+            "ApproximateNumberOfMessagesNotVisible"
+        ]
     )
 
     visible = int(attrs["Attributes"]["ApproximateNumberOfMessages"])
@@ -30,15 +33,11 @@ def lambda_handler(event, context):
 
     if total > 0 and current_capacity == 0:
         print(f"[ASG] Scaling UP {asg_name} to 1")
-        try:
-            asg.set_desired_capacity(
-                AutoScalingGroupName=asg_name,
-                DesiredCapacity=1,
-                HonorCooldown=False
-            )
-            print("[ASG] Scale-up successful")
-        except Exception as e:
-            print(f"[ASG] Scale-up failed: {e}")
+        asg.set_desired_capacity(
+            AutoScalingGroupName=asg_name,
+            DesiredCapacity=1,
+            HonorCooldown=False
+        )
 
     elif total == 0 and current_capacity > 0:
         print(f"[ASG] Attempting to scale DOWN {asg_name} to 0")

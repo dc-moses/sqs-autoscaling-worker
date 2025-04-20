@@ -67,7 +67,7 @@ jobs:
               --role arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-ci-role \
               --handler lambda_trigger.lambda_handler \
               --zip-file fileb://lambda.zip \
-              --environment '{"Variables":{"QUEUE_URL":"dummy","ASG_NAME":"dummy"}}'
+              --environment '{"Variables":{"QUEUE_URL":"dummy-to-be-updated","ASG_NAME":"dummy"}}'
           fi
 
       - name: Update Lambda environment with real queue URL and ASG name
@@ -88,6 +88,14 @@ jobs:
             --function-name $LAMBDA_NAME \
             --environment "{\"Variables\":{\"QUEUE_URL\":\"$QUEUE_URL\",\"ASG_NAME\":\"$ASG_NAME\"}}"
 
+      - name: Confirm Lambda environment variables
+        run: |
+          echo "Fetching Lambda environment variables..."
+          aws lambda get-function-configuration \
+            --function-name $LAMBDA_NAME \
+            --query 'Environment.Variables' \
+            --output json
+
       - name: Deploy API Gateway
         run: |
           sed -i "s/YourLambdaFunctionName/$LAMBDA_NAME/g" deploy_api_gateway.py
@@ -101,15 +109,6 @@ jobs:
             --output text)
           echo "Sending test job to queue: $QUEUE_URL"
           aws sqs send-message --queue-url "$QUEUE_URL" --message-body '{"wait_seconds":10}'
-
-      - name: Manually trigger Lambda for instant scaling
-        run: |
-          echo "Invoking Lambda manually to avoid waiting for 1-minute schedule..."
-          aws lambda invoke \
-            --function-name $LAMBDA_NAME \
-            --invocation-type Event \
-            --payload '{}' \
-            /dev/null
 
       - name: Wait for ASG to scale up and down
         run: |
