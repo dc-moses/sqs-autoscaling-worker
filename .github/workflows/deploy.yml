@@ -67,23 +67,26 @@ jobs:
               --role arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-ci-role \
               --handler lambda_trigger.lambda_handler \
               --zip-file fileb://lambda.zip \
-              --environment Variables="{QUEUE_URL=dummy-to-be-updated,ASG_NAME=dummy}"
+              --environment '{"Variables":{"QUEUE_URL":"dummy-to-be-updated","ASG_NAME":"dummy"}}'
           fi
 
-      - name: Update Lambda environment with real queue URL
+      - name: Update Lambda environment with real queue URL and ASG name
         run: |
           QUEUE_URL=$(aws cloudformation describe-stacks \
             --stack-name SQSWorkerStack \
             --query "Stacks[0].Outputs[?OutputKey=='SQSQueueURL'].OutputValue" \
             --output text)
+
           ASG_NAME=$(aws cloudformation describe-stack-resources \
             --stack-name SQSWorkerStack \
             --query "StackResources[?ResourceType=='AWS::AutoScaling::AutoScalingGroup'].PhysicalResourceId" \
             --output text)
+
           echo "Updating Lambda with QUEUE_URL=$QUEUE_URL and ASG_NAME=$ASG_NAME"
+
           aws lambda update-function-configuration \
             --function-name $LAMBDA_NAME \
-            --environment 'Variables={"QUEUE_URL":"'"$QUEUE_URL"'","ASG_NAME":"'"$ASG_NAME"'"}'
+            --environment "{\"Variables\":{\"QUEUE_URL\":\"$QUEUE_URL\",\"ASG_NAME\":\"$ASG_NAME\"}}"
 
       - name: Deploy API Gateway
         run: |
@@ -139,18 +142,6 @@ jobs:
             fi
             sleep 30
           done
-
-      - name: Fetch recent Lambda logs (optional)
-        if: always()
-        run: |
-          LOG_GROUP_NAME="/aws/lambda/$LAMBDA_NAME"
-          echo "Fetching logs from $LOG_GROUP_NAME"
-          aws logs describe-log-streams \
-            --log-group-name "$LOG_GROUP_NAME" \
-            --order-by "LastEventTime" --descending \
-            --limit 1 \
-            --query "logStreams[0].logStreamName" --output text | \
-          xargs -I {} aws logs get-log-events --log-group-name "$LOG_GROUP_NAME" --log-stream-name {}
 
       - name: Cleanup CloudFormation stack and S3 bucket
         if: always()
