@@ -161,6 +161,7 @@ Resources:
   ASGScalerSchedule:
     Type: AWS::Events::Rule
     Properties:
+      Description: "Triggers ASG scaler Lambda every minute"
       ScheduleExpression: rate(1 minute)
       Targets:
         - Arn: !GetAtt ASGScalerFunction.Arn
