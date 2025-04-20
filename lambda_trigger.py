@@ -57,11 +57,18 @@ def lambda_handler(event, context):
 
     if total > 0 and current_capacity == 0:
         print(f"[ASG] Scaling UP {asg_name} to 1")
-        asg.set_desired_capacity(
-            AutoScalingGroupName=asg_name,
-            DesiredCapacity=1,
-            HonorCooldown=False
-        )
+        try:
+            asg.set_desired_capacity(
+                AutoScalingGroupName=asg_name,
+                DesiredCapacity=1,
+                HonorCooldown=False
+            )
+        except botocore.exceptions.ClientError as e:
+            print(f"[ASG] Failed to scale up: {e}")
+            return {
+                "statusCode": 500,
+                "body": f"Error scaling up: {e}"
+            }
 
     elif total == 0 and current_capacity > 0:
         print(f"[ASG] Attempting to scale DOWN {asg_name} to 0")
