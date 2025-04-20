@@ -7,26 +7,50 @@ def lambda_handler(event, context):
     sqs = boto3.client("sqs")
     asg = boto3.client("autoscaling")
 
-    queue_url = os.environ["QUEUE_URL"]
-    asg_name = os.environ["ASG_NAME"]
+    queue_url = os.environ.get("QUEUE_URL")
+    asg_name = os.environ.get("ASG_NAME")
 
-    attrs = sqs.get_queue_attributes(
-        QueueUrl=queue_url,
-        AttributeNames=[
-            "ApproximateNumberOfMessages",
-            "ApproximateNumberOfMessagesNotVisible"
-        ]
-    )
+    if not queue_url or not asg_name:
+        print("[ERROR] Missing required environment variables.")
+        return {
+            "statusCode": 500,
+            "body": "Missing QUEUE_URL or ASG_NAME in environment variables"
+        }
 
-    visible = int(attrs["Attributes"]["ApproximateNumberOfMessages"])
-    not_visible = int(attrs["Attributes"]["ApproximateNumberOfMessagesNotVisible"])
+    print(f"[ENV] QUEUE_URL={queue_url}")
+    print(f"[ENV] ASG_NAME={asg_name}")
+
+    try:
+        attrs = sqs.get_queue_attributes(
+            QueueUrl=queue_url,
+            AttributeNames=[
+                "ApproximateNumberOfMessages",
+                "ApproximateNumberOfMessagesNotVisible"
+            ]
+        )
+    except botocore.exceptions.ClientError as e:
+        print(f"[ERROR] Failed to fetch SQS attributes: {e}")
+        return {
+            "statusCode": 500,
+            "body": f"Error fetching queue attributes: {e}"
+        }
+
+    visible = int(attrs["Attributes"].get("ApproximateNumberOfMessages", 0))
+    not_visible = int(attrs["Attributes"].get("ApproximateNumberOfMessagesNotVisible", 0))
     total = visible + not_visible
 
     print(f"[SQS] Visible: {visible}, NotVisible: {not_visible}, Total: {total}")
 
-    group = asg.describe_auto_scaling_groups(
-        AutoScalingGroupNames=[asg_name]
-    )["AutoScalingGroups"][0]
+    try:
+        group = asg.describe_auto_scaling_groups(
+            AutoScalingGroupNames=[asg_name]
+        )["AutoScalingGroups"][0]
+    except (IndexError, botocore.exceptions.ClientError) as e:
+        print(f"[ERROR] Failed to fetch ASG info: {e}")
+        return {
+            "statusCode": 500,
+            "body": f"Error fetching ASG details: {e}"
+        }
 
     current_capacity = group["DesiredCapacity"]
     print(f"[ASG] Current desired capacity: {current_capacity}")
