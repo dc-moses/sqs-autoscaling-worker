@@ -88,14 +88,6 @@ jobs:
             --function-name $LAMBDA_NAME \
             --environment "{\"Variables\":{\"QUEUE_URL\":\"$QUEUE_URL\",\"ASG_NAME\":\"$ASG_NAME\"}}"
 
-      - name: Confirm Lambda environment variables
-        run: |
-          echo "Fetching Lambda environment variables..."
-          aws lambda get-function-configuration \
-            --function-name $LAMBDA_NAME \
-            --query 'Environment.Variables' \
-            --output json
-
       - name: Deploy API Gateway
         run: |
           sed -i "s/YourLambdaFunctionName/$LAMBDA_NAME/g" deploy_api_gateway.py
@@ -129,7 +121,7 @@ jobs:
               --query "AutoScalingGroups[0].Instances[0].InstanceId" \
               --output text)
 
-            if [ "$DESIRED" -ge 1 ] && [ "$INSTANCE_ID" != "None" ]; then
+            if [[ "$DESIRED" =~ ^[0-9]+$ ]] && [ "$DESIRED" -ge 1 ] && [ "$INSTANCE_ID" != "None" ]; then
               echo "✅ ASG scaled up with instance $INSTANCE_ID."
               break
             fi
