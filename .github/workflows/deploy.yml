@@ -70,23 +70,20 @@ jobs:
               --environment Variables="{QUEUE_URL=dummy-to-be-updated,ASG_NAME=dummy}"
           fi
 
-      - name: Update Lambda environment with real values
+      - name: Update Lambda environment with real queue URL
         run: |
           QUEUE_URL=$(aws cloudformation describe-stacks \
             --stack-name SQSWorkerStack \
             --query "Stacks[0].Outputs[?OutputKey=='SQSQueueURL'].OutputValue" \
             --output text)
-
-          ASG_NAME=$(aws cloudformation describe-stacks \
+          ASG_NAME=$(aws cloudformation describe-stack-resources \
             --stack-name SQSWorkerStack \
-            --query "Stacks[0].Outputs[?OutputKey=='AutoScalingGroupName'].OutputValue" \
+            --query "StackResources[?ResourceType=='AWS::AutoScaling::AutoScalingGroup'].PhysicalResourceId" \
             --output text)
-
           echo "Updating Lambda with QUEUE_URL=$QUEUE_URL and ASG_NAME=$ASG_NAME"
-
           aws lambda update-function-configuration \
             --function-name $LAMBDA_NAME \
-            --environment "Variables={\"QUEUE_URL\":\"$QUEUE_URL\",\"ASG_NAME\":\"$ASG_NAME\"}"
+            --environment 'Variables={"QUEUE_URL":"'"$QUEUE_URL"'","ASG_NAME":"'"$ASG_NAME"'"}'
 
       - name: Deploy API Gateway
         run: |
