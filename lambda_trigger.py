@@ -3,53 +3,31 @@ import os
 import time
 import botocore.exceptions
 
-sqs = boto3.client("sqs")
-asg = boto3.client("autoscaling")
-
 def lambda_handler(event, context):
-    queue_url = os.environ.get("QUEUE_URL")
-    asg_name = os.environ.get("ASG_NAME")
+    sqs = boto3.client("sqs")
+    asg = boto3.client("autoscaling")
 
-    if not queue_url or not asg_name:
-        print("[ERROR] Missing QUEUE_URL or ASG_NAME in environment variables.")
-        return {
-            "statusCode": 500,
-            "body": "Missing QUEUE_URL or ASG_NAME"
-        }
+    queue_url = os.environ["QUEUE_URL"]
+    asg_name = os.environ["ASG_NAME"]
 
-    try:
-        attrs = sqs.get_queue_attributes(
-            QueueUrl=queue_url,
-            AttributeNames=[
-                "ApproximateNumberOfMessages",
-                "ApproximateNumberOfMessagesNotVisible"
-            ]
-        )
-        visible = int(attrs["Attributes"].get("ApproximateNumberOfMessages", 0))
-        not_visible = int(attrs["Attributes"].get("ApproximateNumberOfMessagesNotVisible", 0))
-        total = visible + not_visible
-        print(f"[SQS] Visible: {visible}, In-flight (not visible): {not_visible}, Total: {total}")
-    except Exception as e:
-        print(f"[ERROR] Failed to fetch SQS attributes: {e}")
-        return {
-            "statusCode": 500,
-            "body": "SQS get_queue_attributes failed"
-        }
+    attrs = sqs.get_queue_attributes(
+        QueueUrl=queue_url,
+        AttributeNames=["ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible"]
+    )
 
-    try:
-        group = asg.describe_auto_scaling_groups(
-            AutoScalingGroupNames=[asg_name]
-        )["AutoScalingGroups"][0]
-        current_capacity = group["DesiredCapacity"]
-        print(f"[ASG] Current desired capacity: {current_capacity}")
-    except Exception as e:
-        print(f"[ERROR] Failed to describe ASG: {e}")
-        return {
-            "statusCode": 500,
-            "body": "ASG describe failed"
-        }
+    visible = int(attrs["Attributes"]["ApproximateNumberOfMessages"])
+    not_visible = int(attrs["Attributes"]["ApproximateNumberOfMessagesNotVisible"])
+    total = visible + not_visible
 
-    # Scale UP if messages and ASG is at 0
+    print(f"[SQS] Visible: {visible}, NotVisible: {not_visible}, Total: {total}")
+
+    group = asg.describe_auto_scaling_groups(
+        AutoScalingGroupNames=[asg_name]
+    )["AutoScalingGroups"][0]
+
+    current_capacity = group["DesiredCapacity"]
+    print(f"[ASG] Current desired capacity: {current_capacity}")
+
     if total > 0 and current_capacity == 0:
         print(f"[ASG] Scaling UP {asg_name} to 1")
         try:
@@ -58,14 +36,10 @@ def lambda_handler(event, context):
                 DesiredCapacity=1,
                 HonorCooldown=False
             )
+            print("[ASG] Scale-up successful")
         except Exception as e:
-            print(f"[ERROR] Failed to scale up: {e}")
-            return {
-                "statusCode": 500,
-                "body": "Scale up failed"
-            }
+            print(f"[ASG] Scale-up failed: {e}")
 
-    # Scale DOWN if no messages and ASG is greater than 0
     elif total == 0 and current_capacity > 0:
         print(f"[ASG] Attempting to scale DOWN {asg_name} to 0")
         for attempt in range(3):
@@ -78,17 +52,13 @@ def lambda_handler(event, context):
                 print(f"[ASG] Scale-down request successful on attempt {attempt + 1}")
                 break
             except botocore.exceptions.ClientError as e:
-                print(f"[ASG] Attempt {attempt + 1} failed: {e}")
+                print(f"[ASG] Attempt {attempt + 1} failed to scale down: {e}")
                 if attempt < 2:
                     time.sleep(5)
                 else:
                     print("[ASG] All scale-down attempts failed.")
-                    return {
-                        "statusCode": 500,
-                        "body": "Scale down failed after retries"
-                    }
 
     return {
         "statusCode": 200,
-        "body": f"QueueTotal={total}, DesiredCapacity={current_capacity}"
+        "body": f"Queue={total}, DesiredCapacity={current_capacity}"
     }
