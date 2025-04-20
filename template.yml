@@ -74,9 +74,6 @@ Resources:
 
   ASGScalerFunction:
     Type: AWS::Lambda::Function
-    DependsOn:
-      - WorkerQueue
-      - AutoScalingGroup
     Properties:
       FunctionName: ASGScalerFunction
       Handler: lambda_trigger.lambda_handler
@@ -100,10 +97,7 @@ Resources:
 
               if not queue_url or not asg_name:
                   print("[ERROR] Missing required environment variables.")
-                  return {
-                      "statusCode": 500,
-                      "body": "Missing QUEUE_URL or ASG_NAME"
-                  }
+                  return {"statusCode": 500, "body": "Missing QUEUE_URL or ASG_NAME"}
 
               print(f"[ENV] QUEUE_URL={queue_url}")
               print(f"[ENV] ASG_NAME={asg_name}")
@@ -115,10 +109,7 @@ Resources:
                   )
               except botocore.exceptions.ClientError as e:
                   print(f"[ERROR] Failed to fetch SQS attributes: {e}")
-                  return {
-                      "statusCode": 500,
-                      "body": str(e)
-                  }
+                  return {"statusCode": 500, "body": str(e)}
 
               visible = int(attrs["Attributes"].get("ApproximateNumberOfMessages", 0))
               not_visible = int(attrs["Attributes"].get("ApproximateNumberOfMessagesNotVisible", 0))
@@ -158,12 +149,13 @@ Resources:
               }
       Environment:
         Variables:
-          QUEUE_URL: "dummy"
-          ASG_NAME: "dummy"
+          QUEUE_URL: !Ref WorkerQueue
+          ASG_NAME: !Ref AutoScalingGroup
 
   ASGScalerSchedule:
     Type: AWS::Events::Rule
     Properties:
+      Name: ASGScalerSchedule
       ScheduleExpression: rate(1 minute)
       State: ENABLED
       Targets:
