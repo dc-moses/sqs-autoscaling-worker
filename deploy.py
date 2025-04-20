@@ -13,7 +13,6 @@ TEMPLATE_PATH = "template.yml"
 s3 = boto3.client("s3", region_name=REGION)
 cf = boto3.client("cloudformation", region_name=REGION)
 ec2 = boto3.client("ec2", region_name=REGION)
-autoscaling = boto3.client("autoscaling", region_name=REGION)
 
 
 def create_bucket_and_upload():
@@ -82,45 +81,6 @@ def log_stack_failure():
         print(f"⚠️ Could not retrieve stack events: {e}")
 
 
-def wait_for_scale_events():
-    print("⏳ Waiting for scale-up...")
-    asg_name = get_asg_name()
-    instance_id = None
-
-    # Wait for scale-up
-    for i in range(40):
-        response = autoscaling.describe_auto_scaling_groups(AutoScalingGroupNames=[asg_name])
-        asg = response["AutoScalingGroups"][0]
-        instances = asg["Instances"]
-        if len(instances) > 0:
-            instance_id = instances[0]["InstanceId"]
-            print(f"✅ ASG scaled up. Instance ID: {instance_id}")
-            break
-        print(f"Waiting for scale-up... Poll {i+1}")
-        time.sleep(30)
-
-    print("⏳ Waiting for scale-down...")
-    # Wait for scale-down
-    for i in range(40):
-        response = autoscaling.describe_auto_scaling_groups(AutoScalingGroupNames=[asg_name])
-        instance_count = len(response["AutoScalingGroups"][0]["Instances"])
-        print(f"Poll {i+1}: Current instance count = {instance_count}")
-        if instance_count == 0:
-            print("✅ ASG scaled down to 0.")
-            return
-        time.sleep(30)
-
-    print("❌ EC2 instance did not terminate in expected time.")
-
-
-def get_asg_name():
-    resources = cf.describe_stack_resources(StackName=STACK_NAME)["StackResources"]
-    for res in resources:
-        if res["ResourceType"] == "AWS::AutoScaling::AutoScalingGroup":
-            return res["PhysicalResourceId"]
-    raise Exception("ASG not found")
-
-
 def cleanup(bucket):
     print("⚠️ Cleanup triggered due to failure.")
     try:
@@ -147,8 +107,6 @@ if __name__ == "__main__":
     subnet_id = get_default_subnet()
     success = deploy_stack(bucket_name, subnet_id)
 
-    if success:
-        wait_for_scale_events()
-    else:
+    if not success:
         cleanup(bucket_name)
         exit(1)
