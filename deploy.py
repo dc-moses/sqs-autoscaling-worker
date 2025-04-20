@@ -3,6 +3,7 @@ import os
 import time
 import uuid
 import botocore.exceptions
+import re
 
 REGION = "us-east-1"
 STACK_NAME = "SQSWorkerStack"
@@ -135,6 +136,21 @@ def ensure_eventbridge_rule(lambda_arn):
     print("✅ EventBridge rule and Lambda target verified.")
 
 
+def cleanup_all_worker_buckets():
+    print("🧹 Scanning for old worker-buckets to delete...")
+
+    s3_resource = boto3.resource("s3", region_name=REGION)
+    for bucket in s3_resource.buckets.all():
+        if re.match(r"^worker-bucket-[a-f0-9]{8}$", bucket.name):
+            print(f"🔸 Deleting bucket: {bucket.name}")
+            try:
+                bucket.objects.all().delete()
+                bucket.delete()
+                print(f"✅ Deleted: {bucket.name}")
+            except Exception as e:
+                print(f"⚠️ Failed to delete {bucket.name}: {e}")
+
+
 if __name__ == "__main__":
     bucket_name = create_bucket_and_upload()
     subnet_id = get_default_subnet()
@@ -142,6 +158,7 @@ if __name__ == "__main__":
 
     if not success:
         print("🚨 Deployment failed.")
+        cleanup_all_worker_buckets()
         exit(1)
 
     queue_url = get_stack_output("SQSQueueURL")
