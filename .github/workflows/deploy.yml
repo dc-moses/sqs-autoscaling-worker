@@ -43,6 +43,7 @@ jobs:
       - name: Deploy CloudFormation stack
         run: |
           set +e
+          echo "AWS_ACCOUNT_ID=${{ secrets.AWS_ACCOUNT_ID }}" >> $GITHUB_ENV
           python3 deploy.py
           STATUS=$?
           if [ $STATUS -ne 0 ]; then
@@ -214,18 +215,21 @@ jobs:
             sleep 30
           done
 
-      - name: Cleanup CloudFormation stack and S3 bucket
+      - name: Cleanup CloudFormation stack and S3 buckets
         if: always()
         run: |
-          echo "🧹 Cleaning up CloudFormation stack and S3 bucket..."
+          echo "🧹 Cleaning up CloudFormation stack and all S3 buckets..."
           aws cloudformation delete-stack --stack-name SQSWorkerStack || true
           aws cloudformation wait stack-delete-complete --stack-name SQSWorkerStack || echo "⚠️ Stack deletion waiter timed out"
 
-          BUCKET_NAME=$(aws s3api list-buckets --query "Buckets[?starts_with(Name, 'worker-bucket-')].Name" --output text | head -n1)
-          if [ -n "$BUCKET_NAME" ]; then
-            aws s3 rm s3://$BUCKET_NAME --recursive || true
-            aws s3api delete-bucket --bucket $BUCKET_NAME || true
-            echo "✅ Bucket $BUCKET_NAME deleted."
+          BUCKET_NAMES=$(aws s3api list-buckets --query "Buckets[?starts_with(Name, 'worker-bucket-')].Name" --output text)
+          if [ -z "$BUCKET_NAMES" ]; then
+            echo "No matching worker buckets found."
           else
-            echo "No matching worker bucket found."
+            for BUCKET in $BUCKET_NAMES; do
+              echo "🧹 Deleting bucket: $BUCKET"
+              aws s3 rm s3://$BUCKET --recursive || true
+              aws s3api delete-bucket --bucket $BUCKET || true
+              echo "✅ Bucket $BUCKET deleted."
+            done
           fi
