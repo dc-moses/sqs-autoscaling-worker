@@ -9,11 +9,13 @@ STACK_NAME = "SQSWorkerStack"
 SCRIPT_KEY = "worker.py"
 SCRIPT_PATH = "worker.py"
 TEMPLATE_PATH = "template.yml"
+LAMBDA_NAME = "ASGScalerFunction"
 
 s3 = boto3.client("s3", region_name=REGION)
 cf = boto3.client("cloudformation", region_name=REGION)
 ec2 = boto3.client("ec2", region_name=REGION)
-logs = boto3.client("logs", region_name=REGION)
+lambda_client = boto3.client("lambda", region_name=REGION)
+events = boto3.client("events", region_name=REGION)
 
 
 def create_bucket_and_upload():
@@ -43,53 +45,32 @@ def deploy_stack(bucket, subnet):
     with open(TEMPLATE_PATH) as f:
         template_body = f.read()
 
-    stack_exists = False
     try:
-        cf.describe_stacks(StackName=STACK_NAME)
-        stack_exists = True
-        print("ℹ️ Stack exists. Updating...")
+        cf.create_stack(
+            StackName=STACK_NAME,
+            TemplateBody=template_body,
+            Capabilities=["CAPABILITY_NAMED_IAM"],
+            Parameters=[
+                {"ParameterKey": "WorkerScriptBucket", "ParameterValue": bucket},
+                {"ParameterKey": "WorkerScriptKey", "ParameterValue": SCRIPT_KEY},
+                {"ParameterKey": "SubnetId", "ParameterValue": subnet}
+            ]
+        )
     except botocore.exceptions.ClientError as e:
-        if "does not exist" in str(e):
-            print("ℹ️ Stack does not exist. Creating...")
+        if "AlreadyExistsException" in str(e):
+            print("⚠️ Stack already exists.")
         else:
             raise
 
     try:
-        parameters = [
-            {"ParameterKey": "WorkerScriptBucket", "ParameterValue": bucket},
-            {"ParameterKey": "WorkerScriptKey", "ParameterValue": SCRIPT_KEY},
-            {"ParameterKey": "SubnetId", "ParameterValue": subnet}
-        ]
-
-        if stack_exists:
-            cf.update_stack(
-                StackName=STACK_NAME,
-                TemplateBody=template_body,
-                Capabilities=["CAPABILITY_NAMED_IAM"],
-                Parameters=parameters
-            )
-            waiter = cf.get_waiter("stack_update_complete")
-        else:
-            cf.create_stack(
-                StackName=STACK_NAME,
-                TemplateBody=template_body,
-                Capabilities=["CAPABILITY_NAMED_IAM"],
-                Parameters=parameters
-            )
-            waiter = cf.get_waiter("stack_create_complete")
-
+        waiter = cf.get_waiter("stack_create_complete")
         waiter.wait(StackName=STACK_NAME)
-        print("✅ Stack deployed successfully.")
+        print("✅ Stack created successfully.")
         return True
-
-    except botocore.exceptions.ClientError as e:
-        if "No updates are to be performed" in str(e):
-            print("⚠️ No updates were necessary.")
-            return True
-        else:
-            print(f"❌ Stack deployment error: {e}")
-            log_stack_failure()
-            return False
+    except botocore.exceptions.WaiterError as e:
+        print(f"❌ Stack creation failed: {e}")
+        log_stack_failure()
+        return False
 
 
 def get_stack_output(output_key):
@@ -99,6 +80,29 @@ def get_stack_output(output_key):
         if output["OutputKey"] == output_key:
             return output["OutputValue"]
     return None
+
+
+def update_lambda_env(queue_url, asg_name):
+    print(f"🔧 Updating Lambda environment with QUEUE_URL and ASG_NAME...")
+    lambda_client.update_function_configuration(
+        FunctionName=LAMBDA_NAME,
+        Environment={
+            "Variables": {
+                "QUEUE_URL": queue_url,
+                "ASG_NAME": asg_name
+            }
+        }
+    )
+    print("✅ Lambda environment updated.")
+
+
+def verify_eventbridge_rule():
+    print("🔍 Checking if EventBridge rule exists...")
+    rules = events.list_rules(NamePrefix="ASGScalerSchedule")["Rules"]
+    if not rules:
+        print("❌ EventBridge rule not found. Lambda will not trigger!")
+    else:
+        print(f"✅ Found EventBridge rule: {rules[0]['Name']}")
 
 
 def log_stack_failure():
@@ -143,4 +147,12 @@ if __name__ == "__main__":
         exit(1)
 
     queue_url = get_stack_output("SQSQueueURL")
-    print(f"ℹ️ SQS Queue URL: {queue_url}")
+    asg_name = get_stack_output("AutoScalingGroupName")
+
+    if queue_url and asg_name:
+        print(f"ℹ️ SQS Queue URL: {queue_url}")
+        print(f"ℹ️ Auto Scaling Group Name: {asg_name}")
+        update_lambda_env(queue_url, asg_name)
+        verify_eventbridge_rule()
+    else:
+        print("❌ Failed to retrieve required stack outputs.")

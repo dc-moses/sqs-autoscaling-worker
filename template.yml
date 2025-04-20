@@ -74,6 +74,9 @@ Resources:
 
   ASGScalerFunction:
     Type: AWS::Lambda::Function
+    DependsOn:
+      - WorkerQueue
+      - AutoScalingGroup
     Properties:
       FunctionName: ASGScalerFunction
       Handler: lambda_trigger.lambda_handler
@@ -155,14 +158,14 @@ Resources:
               }
       Environment:
         Variables:
-          QUEUE_URL: !Ref WorkerQueue
-          ASG_NAME: !Ref AutoScalingGroup
+          QUEUE_URL: "dummy"
+          ASG_NAME: "dummy"
 
   ASGScalerSchedule:
     Type: AWS::Events::Rule
     Properties:
-      Description: "Triggers ASG scaler Lambda every minute"
       ScheduleExpression: rate(1 minute)
+      State: ENABLED
       Targets:
         - Arn: !GetAtt ASGScalerFunction.Arn
           Id: ASGScalerTarget
