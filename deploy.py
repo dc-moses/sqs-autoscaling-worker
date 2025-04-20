@@ -13,6 +13,7 @@ TEMPLATE_PATH = "template.yml"
 s3 = boto3.client("s3", region_name=REGION)
 cf = boto3.client("cloudformation", region_name=REGION)
 ec2 = boto3.client("ec2", region_name=REGION)
+logs = boto3.client("logs", region_name=REGION)
 
 
 def create_bucket_and_upload():
@@ -50,7 +51,7 @@ def deploy_stack(bucket, subnet):
             Parameters=[
                 {"ParameterKey": "WorkerScriptBucket", "ParameterValue": bucket},
                 {"ParameterKey": "WorkerScriptKey", "ParameterValue": SCRIPT_KEY},
-                {"ParameterKey": "SubnetId", "ParameterValue": subnet},
+                {"ParameterKey": "SubnetId", "ParameterValue": subnet}
             ]
         )
     except botocore.exceptions.ClientError as e:
@@ -68,6 +69,15 @@ def deploy_stack(bucket, subnet):
         print(f"❌ Stack creation failed: {e}")
         log_stack_failure()
         return False
+
+
+def get_stack_output(output_key):
+    response = cf.describe_stacks(StackName=STACK_NAME)
+    outputs = response["Stacks"][0].get("Outputs", [])
+    for output in outputs:
+        if output["OutputKey"] == output_key:
+            return output["OutputValue"]
+    return None
 
 
 def log_stack_failure():
@@ -110,3 +120,7 @@ if __name__ == "__main__":
     if not success:
         cleanup(bucket_name)
         exit(1)
+
+    # Optional logging to confirm deployment outputs
+    queue_url = get_stack_output("SQSQueueURL")
+    print(f"ℹ️ SQS Queue URL: {queue_url}")
