@@ -83,6 +83,18 @@ def get_stack_output(key):
 
 
 def update_lambda_env(lambda_name, queue_url, asg_name):
+    print("🔧 Waiting for Lambda to become active before updating environment...")
+    for attempt in range(10):
+        config = lambda_client.get_function_configuration(FunctionName=lambda_name)
+        status = config.get("LastUpdateStatus")
+        if status == "Successful":
+            break
+        print(f"⏳ Lambda update status: {status} (attempt {attempt + 1}/10)")
+        time.sleep(5)
+    else:
+        print("⚠️ Timed out waiting for Lambda to be ready.")
+        return
+
     print("🔧 Updating Lambda environment with QUEUE_URL and ASG_NAME...")
     lambda_client.update_function_configuration(
         FunctionName=lambda_name,
