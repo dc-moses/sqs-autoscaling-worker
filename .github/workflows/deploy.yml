@@ -160,8 +160,13 @@ jobs:
         run: |
           echo "🔍 Checking for job completion via SSM..."
 
+          ASG_NAME=$(aws cloudformation describe-stack-resources \
+            --stack-name SQSWorkerStack \
+            --query "StackResources[?ResourceType=='AWS::AutoScaling::AutoScalingGroup'].PhysicalResourceId" \
+            --output text)
+
           INSTANCE_ID=$(aws autoscaling describe-auto-scaling-groups \
-            --auto-scaling-group-names SQSWorkerStack-AutoScalingGroup \
+            --auto-scaling-group-names "$ASG_NAME" \
             --query "AutoScalingGroups[0].Instances[0].InstanceId" \
             --output text)
 
