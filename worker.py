@@ -4,6 +4,7 @@ import sys
 import time
 import json
 import requests
+from datetime import datetime
 
 def wait_until_instance_running():
     try:
@@ -49,12 +50,16 @@ if not messages:
 message = messages[0]
 receipt_handle = message["ReceiptHandle"]
 body = message["Body"]
+message_id = message.get("MessageId", "unknown")
 
 print(f"[Worker] Got message: {body}")
+print(f"[Worker] Started job: MessageId={message_id}")
+
 # Simulate processing
 time.sleep(5)
-print("[Worker] Done.")
+
+print(f"[Worker] Done. MessageId={message_id} at {datetime.utcnow().isoformat()}")
+print("[Worker] Message deleted.")
 
 # Delete message
 sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
-print("[Worker] Message deleted.")
