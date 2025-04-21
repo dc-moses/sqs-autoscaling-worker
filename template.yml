@@ -18,6 +18,9 @@ Resources:
   LaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     Properties:
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
       LaunchTemplateData:
         ImageId:
           Fn::Sub: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2}}"
@@ -25,20 +28,22 @@ Resources:
         UserData:
           Fn::Base64: !Sub |
             #!/bin/bash
-            echo "[Init] Installing dependencies..." | tee -a /var/log/worker.log
+            echo "[UserData] Bootstrapping instance..." >> /var/log/worker.log
             yum install -y python3 aws-cli >> /var/log/worker.log 2>&1
 
-            echo "[Init] Downloading worker script from S3..." | tee -a /var/log/worker.log
+            echo "[UserData] Installing boto3..." >> /var/log/worker.log
+            pip3 install boto3 >> /var/log/worker.log 2>&1
+
+            echo "[UserData] Downloading worker script..." >> /var/log/worker.log
             aws s3 cp s3://${WorkerScriptBucket}/${WorkerScriptKey} /home/ec2-user/worker.py >> /var/log/worker.log 2>&1
             chmod +x /home/ec2-user/worker.py
 
-            echo "[Init] Fetching queue URL from CloudFormation..." | tee -a /var/log/worker.log
             QUEUE_URL=$(aws cloudformation describe-stacks \
-              --stack-name SQSWorkerStack \
+              --stack-name ${AWS::StackName} \
               --query "Stacks[0].Outputs[?OutputKey=='SQSQueueURL'].OutputValue" \
               --output text)
 
-            echo "[Init] Launching worker.py with queue URL $QUEUE_URL" | tee -a /var/log/worker.log
+            echo "[UserData] Starting worker.py with QUEUE_URL=$QUEUE_URL" >> /var/log/worker.log
             nohup python3 /home/ec2-user/worker.py "$QUEUE_URL" >> /var/log/worker.log 2>&1 &
 
   AutoScalingGroup:
