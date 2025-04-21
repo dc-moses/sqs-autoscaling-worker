@@ -175,6 +175,22 @@ jobs:
             exit 1
           fi
 
+          echo "⏳ Waiting for instance $INSTANCE_ID to be SSM-ready..."
+          for i in {1..20}; do
+            STATUS=$(aws ssm describe-instance-information \
+              --query "InstanceInformationList[?InstanceId=='$INSTANCE_ID'].PingStatus" \
+              --output text)
+
+            if [ "$STATUS" == "Online" ]; then
+              echo "✅ SSM agent is online."
+              break
+            fi
+
+            echo "Poll $i: SSM agent not ready yet (status: $STATUS)"
+            sleep 10
+          done
+
+          echo "📨 Sending SSM command to instance $INSTANCE_ID..."
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \

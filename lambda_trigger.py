@@ -7,6 +7,8 @@ sqs = boto3.client("sqs")
 asg = boto3.client("autoscaling")
 ec2 = boto3.client("ec2")
 
+VISIBILITY_TIMEOUT_SUGGESTED = 90  # in seconds, should match CF template
+
 def wait_for_instance_initialization(asg_name):
     print(f"[Init] Waiting for EC2 instance in ASG '{asg_name}' to be initialized...")
     for i in range(30):  # Wait up to 5 minutes (30 * 10s)
@@ -48,12 +50,23 @@ def lambda_handler(event, context):
     try:
         attrs = sqs.get_queue_attributes(
             QueueUrl=queue_url,
-            AttributeNames=["ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible"]
+            AttributeNames=[
+                "ApproximateNumberOfMessages",
+                "ApproximateNumberOfMessagesNotVisible",
+                "VisibilityTimeout"
+            ]
         )
         visible = int(attrs["Attributes"].get("ApproximateNumberOfMessages", 0))
         not_visible = int(attrs["Attributes"].get("ApproximateNumberOfMessagesNotVisible", 0))
+        visibility_timeout = int(attrs["Attributes"].get("VisibilityTimeout", 0))
         total = visible + not_visible
+
         print(f"[SQS] Messages: {visible} visible / {not_visible} not visible / {total} total")
+        print(f"[SQS] Queue Visibility Timeout: {visibility_timeout}s")
+
+        if visibility_timeout < VISIBILITY_TIMEOUT_SUGGESTED:
+            print(f"[WARN] Visibility timeout is less than {VISIBILITY_TIMEOUT_SUGGESTED}s. This may cause jobs to be re-queued before completion.")
+
     except Exception as e:
         print(f"[ERROR] Failed to get SQS attributes: {e}")
         return {"statusCode": 500, "body": str(e)}
@@ -71,7 +84,6 @@ def lambda_handler(event, context):
         print("[ASG] Scaling up ASG to 1 instance.")
         asg.set_desired_capacity(AutoScalingGroupName=asg_name, DesiredCapacity=1, HonorCooldown=False)
 
-        # Wait for EC2 to initialize before job dispatch
         if not wait_for_instance_initialization(asg_name):
             return {"statusCode": 500, "body": "EC2 instance failed to initialize."}
 

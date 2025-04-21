@@ -14,6 +14,7 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: worker-queue
+      VisibilityTimeout: 90
 
   InstanceRole:
     Type: AWS::IAM::Role
