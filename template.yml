@@ -46,25 +46,23 @@ Resources:
         ImageId:
           Fn::Sub: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2}}"
         InstanceType: t2.micro
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            echo "[UserData] Bootstrapping instance..." >> /var/log/worker.log
+            yum install -y python3 aws-cli >> /var/log/worker.log 2>&1
+            pip3 install boto3 >> /var/log/worker.log 2>&1
+            aws s3 cp s3://${WorkerScriptBucket}/${WorkerScriptKey} /home/ec2-user/worker.py >> /var/log/worker.log 2>&1
+            chmod +x /home/ec2-user/worker.py
+            echo "[UserData] Setup complete" >> /var/log/worker.log
 
-  UserData:
-    Fn::Base64:
-      !Sub |
-        #!/bin/bash
-        echo "[UserData] Bootstrapping instance..." >> /var/log/worker.log
-        yum install -y python3 aws-cli >> /var/log/worker.log 2>&1
-        pip3 install boto3 >> /var/log/worker.log 2>&1
-        aws s3 cp s3://${WorkerScriptBucket}/${WorkerScriptKey} /home/ec2-user/worker.py >> /var/log/worker.log 2>&1
-        chmod +x /home/ec2-user/worker.py
-        echo "[UserData] Setup complete" >> /var/log/worker.log
+            QUEUE_URL=$(aws cloudformation describe-stacks \
+              --stack-name ${AWS::StackName} \
+              --query "Stacks[0].Outputs[?OutputKey=='SQSQueueURL'].OutputValue" \
+              --output text)
 
-        QUEUE_URL=$(aws cloudformation describe-stacks \
-          --stack-name ${AWS::StackName} \
-          --query "Stacks[0].Outputs[?OutputKey=='SQSQueueURL'].OutputValue" \
-          --output text)
-
-        echo "[UserData] Starting worker.py with QUEUE_URL=$QUEUE_URL" >> /var/log/worker.log
-        nohup python3 /home/ec2-user/worker.py "$QUEUE_URL" >> /var/log/worker.log 2>&1 &
+            echo "[UserData] Starting worker.py with QUEUE_URL=$QUEUE_URL" >> /var/log/worker.log
+            nohup python3 /home/ec2-user/worker.py "$QUEUE_URL" >> /var/log/worker.log 2>&1 &
 
   AutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
