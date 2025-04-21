@@ -21,7 +21,6 @@ ec2 = boto3.client("ec2", region_name=REGION)
 asg = boto3.client("autoscaling", region_name=REGION)
 lambda_client = boto3.client("lambda", region_name=REGION)
 events = boto3.client("events", region_name=REGION)
-ssm = boto3.client("ssm", region_name=REGION)
 
 def create_bucket_and_upload():
     bucket_name = f"worker-bucket-{uuid.uuid4().hex[:8]}"
@@ -78,31 +77,6 @@ def get_stack_output(key):
         if output["OutputKey"] == key:
             return output["OutputValue"]
     return None
-
-def wait_for_instance_initialization(asg_name):
-    print("⏳ Waiting for EC2 instance to initialize...")
-    for attempt in range(30):
-        group = asg.describe_auto_scaling_groups(AutoScalingGroupNames=[asg_name])["AutoScalingGroups"][0]
-        instance_ids = [i["InstanceId"] for i in group["Instances"] if i["LifecycleState"] == "InService"]
-
-        if not instance_ids:
-            print("🔍 No instance in service yet. Retrying...")
-            time.sleep(10)
-            continue
-
-        instance_id = instance_ids[0]
-        statuses = ec2.describe_instance_status(InstanceIds=[instance_id])["InstanceStatuses"]
-        if statuses and all(
-            s["InstanceStatus"]["Status"] == "ok" and s["SystemStatus"]["Status"] == "ok"
-            for s in statuses
-        ):
-            print(f"✅ EC2 instance {instance_id} is initialized and healthy.")
-            return instance_id
-
-        print(f"🔄 Instance status not yet healthy (attempt {attempt + 1}/30)...")
-        time.sleep(10)
-
-    raise Exception("❌ Timeout waiting for EC2 instance to initialize.")
 
 def update_lambda_env(lambda_name, queue_url, asg_name):
     print("🔧 Waiting for Lambda to become active before updating environment...")
@@ -225,17 +199,6 @@ if __name__ == "__main__":
     print(f"ℹ️ Auto Scaling Group Name: {asg_name}")
 
     zip_and_deploy_lambda()
-    instance_id = wait_for_instance_initialization(asg_name)
-
-    # Store instance ID in SSM Parameter Store so Lambda can send commands
-    ssm.put_parameter(
-        Name="/sqs-worker/instance-id",
-        Value=instance_id,
-        Type="String",
-        Overwrite=True
-    )
-    print(f"✅ Stored instance ID {instance_id} in SSM.")
-
     update_lambda_env(LAMBDA_NAME, queue_url, asg_name)
     lambda_arn = lambda_client.get_function(FunctionName=LAMBDA_NAME)["Configuration"]["FunctionArn"]
     ensure_eventbridge_rule(lambda_arn)
