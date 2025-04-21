@@ -50,6 +50,11 @@ Resources:
           Fn::Base64: !Sub |
             #!/bin/bash
             echo "[UserData] Bootstrapping instance..." >> /var/log/worker.log
+
+            # Set region explicitly for boto3 to avoid NoRegionError
+            echo "export AWS_DEFAULT_REGION=us-east-1" >> /etc/profile.d/aws_region.sh
+            export AWS_DEFAULT_REGION=us-east-1
+
             yum install -y python3 aws-cli >> /var/log/worker.log 2>&1
             pip3 install boto3 >> /var/log/worker.log 2>&1
 
