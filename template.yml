@@ -110,7 +110,7 @@ Resources:
       Handler: lambda_trigger.lambda_handler
       Role: !GetAtt ASGScalerFunctionRole.Arn
       Runtime: python3.10
-      Timeout: 60
+      Timeout: 300
       MemorySize: 128
       Code:
         ZipFile: |
