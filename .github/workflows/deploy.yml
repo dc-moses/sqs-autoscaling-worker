@@ -103,13 +103,32 @@ jobs:
             --query "StackResources[?ResourceType=='AWS::AutoScaling::AutoScalingGroup'].PhysicalResourceId" \
             --output text)
 
-          echo "🔍 Waiting for ASG to scale up..."
+          echo "🔍 Waiting for ASG to scale up and launch an instance..."
+
+          INSTANCE_ID=""
           for i in {1..40}; do
             INSTANCE_ID=$(aws autoscaling describe-auto-scaling-groups \
               --auto-scaling-group-names "$ASG_NAME" \
               --query "AutoScalingGroups[0].Instances[0].InstanceId" \
               --output text)
 
+            if [ "$INSTANCE_ID" != "None" ] && [ -n "$INSTANCE_ID" ]; then
+              echo "✅ Found instance ID: $INSTANCE_ID"
+              break
+            fi
+
+            echo "🔄 Poll $i: No instance yet. Waiting..."
+            sleep 10
+          done
+
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" == "None" ]; then
+            echo "❌ No instance launched after waiting. Exiting."
+            exit 1
+          fi
+
+          echo "🔍 Waiting for EC2 instance to be in 'running' state..."
+
+          for i in {1..40}; do
             STATE=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
               --query "Reservations[0].Instances[0].State.Name" --output text)
 
@@ -121,7 +140,8 @@ jobs:
             sleep 10
           done
 
-          echo "Waiting for instance health check..."
+          echo "🔍 Waiting for EC2 health checks to pass..."
+
           for j in {1..20}; do
             STATUS=$(aws ec2 describe-instance-status \
               --instance-ids "$INSTANCE_ID" \
@@ -138,12 +158,18 @@ jobs:
 
       - name: Confirm EC2 processed SQS job via SSM
         run: |
+          echo "🔍 Checking for job completion via SSM..."
+
           INSTANCE_ID=$(aws autoscaling describe-auto-scaling-groups \
             --auto-scaling-group-names SQSWorkerStack-AutoScalingGroup \
             --query "AutoScalingGroups[0].Instances[0].InstanceId" \
             --output text)
 
-          echo "🔍 Invoking SSM to check /var/log/worker.log on instance $INSTANCE_ID..."
+          if [ "$INSTANCE_ID" == "None" ] || [ -z "$INSTANCE_ID" ]; then
+            echo "❌ Could not retrieve instance ID."
+            exit 1
+          fi
+
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
