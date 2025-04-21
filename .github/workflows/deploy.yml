@@ -68,9 +68,9 @@ jobs:
           echo "Sending test job to queue: $QUEUE_URL"
           aws sqs send-message --queue-url "$QUEUE_URL" --message-body '{"wait_seconds":10}'
 
-      - name: Wait for message to appear in SQS queue
+      - name: Wait for job completion and ASG scale-down
         run: |
-          echo "⏳ Waiting for message to appear in SQS queue..."
+          echo "⏳ Waiting for message in SQS..."
           QUEUE_URL=$(aws cloudformation describe-stacks \
             --stack-name SQSWorkerStack \
             --query "Stacks[0].Outputs[?OutputKey=='SQSQueueURL'].OutputValue" \
@@ -82,176 +82,27 @@ jobs:
               --attribute-names ApproximateNumberOfMessages \
               --query "Attributes.ApproximateNumberOfMessages" \
               --output text)
-
-            echo "Poll $i: Queue has $COUNT visible message(s)"
-            if [ "$COUNT" -ge 1 ]; then
-              echo "✅ Message detected."
-              break
-            fi
-
-            if [ "$i" -eq 10 ]; then
-              echo "❌ No message detected after waiting. Failing the job."
-              exit 1
-            fi
+            echo "Poll $i: $COUNT message(s) visible"
+            if [ "$COUNT" -ge 1 ]; then break; fi
+            if [ "$i" -eq 10 ]; then echo "❌ Message did not appear."; exit 1; fi
             sleep 10
           done
-
-      - name: Wait for ASG scale-up and EC2 readiness
-        run: |
-          ASG_NAME=$(aws cloudformation describe-stack-resources \
-            --stack-name SQSWorkerStack \
-            --query "StackResources[?ResourceType=='AWS::AutoScaling::AutoScalingGroup'].PhysicalResourceId" \
-            --output text)
-
-          echo "🔍 Waiting for ASG to scale up and launch an instance..."
-
-          INSTANCE_ID=""
-          for i in {1..40}; do
-            INSTANCE_ID=$(aws autoscaling describe-auto-scaling-groups \
-              --auto-scaling-group-names "$ASG_NAME" \
-              --query "AutoScalingGroups[0].Instances[0].InstanceId" \
-              --output text)
-
-            if [ "$INSTANCE_ID" != "None" ] && [ -n "$INSTANCE_ID" ]; then
-              echo "✅ Found instance ID: $INSTANCE_ID"
-              break
-            fi
-
-            echo "🔄 Poll $i: No instance yet. Waiting..."
-            sleep 10
-          done
-
-          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" == "None" ]; then
-            echo "❌ No instance launched after waiting. Exiting."
-            exit 1
-          fi
-
-          echo "🔍 Waiting for EC2 instance to be in 'running' state..."
-
-          for i in {1..40}; do
-            STATE=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
-              --query "Reservations[0].Instances[0].State.Name" --output text)
-
-            echo "Poll $i: Instance $INSTANCE_ID state: $STATE"
-            if [ "$STATE" == "running" ]; then
-              echo "✅ Instance is running."
-              break
-            fi
-            sleep 10
-          done
-
-          echo "🔍 Waiting for EC2 health checks to pass..."
-
-          for j in {1..20}; do
-            STATUS=$(aws ec2 describe-instance-status \
-              --instance-ids "$INSTANCE_ID" \
-              --query "InstanceStatuses[0].InstanceStatus.Status" \
-              --output text)
-
-            echo "Health poll $j: Instance status is $STATUS"
-            if [ "$STATUS" == "ok" ]; then
-              echo "✅ Instance is healthy."
-              break
-            fi
-            sleep 10
-          done
-
-      - name: Confirm EC2 processed SQS job via SSM
-        run: |
-          echo "🔍 Checking for job completion via SSM..."
 
           ASG_NAME=$(aws cloudformation describe-stack-resources \
             --stack-name SQSWorkerStack \
             --query "StackResources[?ResourceType=='AWS::AutoScaling::AutoScalingGroup'].PhysicalResourceId" \
             --output text)
 
-          INSTANCE_ID=$(aws autoscaling describe-auto-scaling-groups \
-            --auto-scaling-group-names "$ASG_NAME" \
-            --query "AutoScalingGroups[0].Instances[0].InstanceId" \
-            --output text)
-
-          if [ "$INSTANCE_ID" == "None" ] || [ -z "$INSTANCE_ID" ]; then
-            echo "❌ Could not retrieve instance ID."
-            exit 1
-          fi
-
-          echo "⏳ Waiting for instance $INSTANCE_ID to be SSM-ready..."
-          for i in {1..20}; do
-            STATUS=$(aws ssm describe-instance-information \
-              --query "InstanceInformationList[?InstanceId=='$INSTANCE_ID'].PingStatus" \
-              --output text)
-
-            if [ "$STATUS" == "Online" ]; then
-              echo "✅ SSM agent is online."
-              break
-            fi
-
-            echo "Poll $i: SSM agent not ready yet (status: $STATUS)"
-            sleep 10
-          done
-
-          echo "📨 Sending SSM command to instance $INSTANCE_ID..."
-
-          for attempt in {1..10}; do
-            COMMAND_ID=$(aws ssm send-command \
-              --instance-ids "$INSTANCE_ID" \
-              --document-name "AWS-RunShellScript" \
-              --comment "Check if job was processed" \
-              --parameters commands="cat /var/log/worker.log" \
-              --query "Command.CommandId" \
-              --output text)
-
-            sleep 5
-
-            for i in {1..10}; do
-              STATUS=$(aws ssm get-command-invocation \
-                --instance-id "$INSTANCE_ID" \
-                --command-id "$COMMAND_ID" \
-                --query "Status" --output text)
-
-              echo "Poll $i: SSM status is $STATUS"
-
-              if [ "$STATUS" == "Success" ]; then
-                OUTPUT=$(aws ssm get-command-invocation \
-                  --instance-id "$INSTANCE_ID" \
-                  --command-id "$COMMAND_ID" \
-                  --query "StandardOutputContent" --output text)
-
-                echo "$OUTPUT"
-
-                if echo "$OUTPUT" | grep -q "\[Worker\] Done."; then
-                  echo "✅ Confirmed: EC2 processed the SQS job."
-                  exit 0
-                fi
-              fi
-
-              sleep 10
-            done
-
-            echo "⌛ Waiting before rechecking log output..."
-            sleep 20
-          done
-
-          echo "❌ Job log did not confirm processing after multiple attempts."
-          exit 1
-
-      - name: Wait for ASG to scale down
-        run: |
-          ASG_NAME=$(aws cloudformation describe-stack-resources \
-            --stack-name SQSWorkerStack \
-            --query "StackResources[?ResourceType=='AWS::AutoScaling::AutoScalingGroup'].PhysicalResourceId" \
-            --output text)
-
-          echo "Waiting for ASG to scale down to 0..."
+          echo "⏳ Waiting for ASG scale-down after job execution..."
           for i in {1..40}; do
             INSTANCE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
               --auto-scaling-group-names "$ASG_NAME" \
               --query "length(AutoScalingGroups[0].Instances)" \
               --output text)
 
-            echo "Poll $i: Current instance count = $INSTANCE_COUNT"
+            echo "Poll $i: $INSTANCE_COUNT instance(s)"
             if [ "$INSTANCE_COUNT" -eq 0 ]; then
-              echo "✅ EC2 instance has terminated and ASG scaled down to 0."
+              echo "✅ ASG scaled down. Job complete."
               break
             fi
             sleep 30

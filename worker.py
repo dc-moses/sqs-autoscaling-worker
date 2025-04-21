@@ -3,6 +3,28 @@ import os
 import sys
 import time
 import json
+import requests
+
+def wait_until_instance_running():
+    try:
+        identity_doc = requests.get("http://169.254.169.254/latest/dynamic/instance-identity/document", timeout=5).json()
+        instance_id = identity_doc["instanceId"]
+        region = identity_doc["region"]
+    except Exception as e:
+        print(f"[Startup Delay] Failed to get instance metadata: {e}")
+        return
+
+    ec2 = boto3.client("ec2", region_name=region)
+    print(f"[Startup Delay] Waiting for instance {instance_id} to report state 'running'...")
+    for i in range(30):
+        state = ec2.describe_instances(InstanceIds=[instance_id])["Reservations"][0]["Instances"][0]["State"]["Name"]
+        print(f"[Startup Delay] Poll {i+1}: Current state is '{state}'")
+        if state == "running":
+            print(f"[Startup Delay] Instance is running.")
+            return
+        time.sleep(5)
+
+wait_until_instance_running()
 
 queue_url = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("QUEUE_URL")
 if not queue_url:
