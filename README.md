@@ -1,113 +1,123 @@
-# AWS Autoscaling SQS Worker System
+# 🚀 AWS Auto-Scaling SQS Worker System
 
-This project deploys a minimal, scalable queue worker system on AWS using:
+This project deploys a **serverless job dispatcher and EC2-based worker system** using:
 
-- **SQS** for job queueing  
-- **EC2 Auto Scaling Group** that scales from 0 to 1  
-- **CloudWatch** for queue-based scaling  
-- **Lambda** and **API Gateway** (optional) for remote job triggering  
-
----
-
-## ⚙️ How It Works
-
-This system spins up an EC2 instance **only when a message is present** in the SQS queue, runs the job, and automatically scales back down to zero after the queue is empty.
-
-- The Auto Scaling Group (ASG) has **min = 0, max = 1**
-- A CloudWatch alarm monitors the SQS queue
-- When a message arrives, it triggers the ASG to scale to 1
-- The EC2 instance downloads a worker script from S3
-- The script reads the job from the queue and sleeps for `wait_seconds`
-- Once the queue is empty and the cooldown period expires, EC2 scales down to 0
+- **Amazon SQS** – job queue  
+- **EC2 Auto Scaling Group** – scales from 0 to 1 worker  
+- **AWS Lambda** – polls SQS and triggers EC2 jobs via SSM  
+- **GitHub Actions** – deploys the entire stack via IaC  
 
 ---
 
-## 🧱 Components
+## 🧠 How It Works
 
-### CloudFormation Stack
+This architecture ensures that an EC2 instance is **launched only when there's work to do** and shut down automatically when the job is done.
 
-- SQS Queue  
-- S3 Bucket for worker script  
-- IAM Role and Instance Profile  
-- EC2 Launch Template  
-- Auto Scaling Group (0–1 instances)  
-- CloudWatch Alarm  
-- VPC + Subnet + Route Table + IGW  
+1. Jobs are sent to SQS  
+2. A scheduled **Lambda** polls the queue  
+3. If a message is found, the **Auto Scaling Group (ASG)** is scaled to 1  
+4. Once the EC2 instance is ready, Lambda dispatches the job to it via **SSM**  
+5. On successful completion, Lambda deletes the message and scales the ASG back to 0  
 
-### Python Scripts
-
-- `worker.py` – EC2 worker script  
-- `deploy.py` – Deploy stack & upload script  
-- `send_job.py` – CLI to send jobs  
-- `destroy.py` – Teardown script  
-- `lambda_trigger.py` – Lambda for HTTP job trigger (optional)  
-- `deploy_api_gateway.py` – API Gateway deployment (optional)  
+➡️ **No idle compute. Pay only when work runs.**
 
 ---
 
-## 🔧 Prerequisites
+## 📦 What's Deployed
+
+### ✅ Via CloudFormation
+
+- **SQS Queue**  
+- **Auto Scaling Group** (min: 0, max: 1)  
+- **EC2 Launch Template** with SSM + UserData  
+- **Lambda** to poll SQS and trigger jobs  
+- **CloudWatch Scheduled Event** for polling  
+- **IAM Roles + Policies**  
+- **VPC**, Subnet, Route Table, IGW  
+
+### 🐍 Python Scripts
+
+- `deploy.py` – Uploads `worker.py`, deploys full stack, sets Lambda env vars  
+- `worker.py` – Script executed on EC2 to process jobs  
+- `send_job.py` – CLI to enqueue a test job  
+- `destroy.py` – Cleanly tears down all resources  
+
+---
+
+## 🧰 Requirements
 
 - Python 3.6+  
 - AWS CLI configured (`aws configure`)  
-- IAM role/user with permissions (see `iam_policy_template.yaml`)  
-
-Deploy IAM setup:
-```bash
-aws cloudformation deploy \
-  --template-file iam_policy_template.yaml \
-  --stack-name SQSWorkerPolicyStack \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --parameter-overrides CreateUser=false CreateRole=true RoleName=github-ci-role
-```
+- IAM role/user with necessary permissions  
+- GitHub repo secrets for CI/CD (e.g. `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)  
 
 ---
 
-## 🚀 GitHub Deployment
+## 🔄 GitHub Actions Deployment
 
-- GitHub Actions auto-deploys on push to `main`  
-- Creates or updates the Lambda  
-- Deploys the API Gateway  
-- Creates a release on version tag (e.g. `v1.0.0`)  
+The deployment is fully automated via CI/CD:
+
+### 🛠 What it does on push to `main`
+
+- Uploads the latest `worker.py` to a versioned S3 bucket  
+- Deploys or updates the CloudFormation stack  
+- Configures the Lambda and environment  
+- Confirms EC2 scaled up, job processed, and scaled down  
+- Tags a GitHub release on version tags (e.g. `v1.0.0`)  
+
+🧪 The workflow includes **EC2 readiness checks** and **SSM log inspection** to ensure the job succeeded before cleaning up.
 
 ---
 
-## 🛠 Manual Usage
+## 💻 Manual Usage (Optional)
 
-### 1. Deploy the app
+### Deploy the stack
 ```bash
 python3 deploy.py
 ```
 
-### 2. Send a test job
+### Enqueue a test job
 ```bash
-python3 send_job.py --queue-url <QUEUE_URL> --wait 30
+python3 send_job.py --queue-url <QUEUE_URL> --wait 20
 ```
 
+Payload:
 ```json
-{
-  "wait_seconds": 30
-}
+{ "wait_seconds": 20 }
 ```
 
-### 3. Deploy Lambda manually or via CI (optional)
-
-### 4. Deploy API Gateway (optional)
+### Tear down all resources
 ```bash
-python3 deploy_api_gateway.py
-```
-
-### 5. HTTP trigger (optional)
-```bash
-curl -X POST -H 'Content-Type: application/json' \
-     -d '{"wait_seconds": 20}' \
-     https://<api-id>.execute-api.us-east-1.amazonaws.com/prod/enqueue
+python3 destroy.py
 ```
 
 ---
 
-## 🧼 Teardown
+## 📎 Example Job Flow
+
+1. You push to `main`  
+2. GitHub deploys infrastructure and worker logic  
+3. You send a job to SQS  
+4. Lambda detects the job and triggers EC2  
+5. EC2 runs the job and exits  
+6. ASG scales down to 0  
+
+---
+
+## ✅ Benefits
+
+- **Zero idle cost** – EC2 only runs when needed  
+- **Auditable and repeatable** – via CloudFormation + GitHub Actions  
+- **Extensible** – add GPU instances, multiple queues, or API gateway later  
+
+---
+
+## 🧽 Cleanup
+
 ```bash
 python3 destroy.py
 ```
+
+This deletes all infrastructure, including the S3 bucket, SQS queue, and ASG.
 
 ---
