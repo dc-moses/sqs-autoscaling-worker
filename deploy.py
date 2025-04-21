@@ -18,9 +18,10 @@ ZIP_NAME = "lambda.zip"
 s3 = boto3.client("s3", region_name=REGION)
 cf = boto3.client("cloudformation", region_name=REGION)
 ec2 = boto3.client("ec2", region_name=REGION)
+asg = boto3.client("autoscaling", region_name=REGION)
 lambda_client = boto3.client("lambda", region_name=REGION)
 events = boto3.client("events", region_name=REGION)
-
+ssm = boto3.client("ssm", region_name=REGION)
 
 def create_bucket_and_upload():
     bucket_name = f"worker-bucket-{uuid.uuid4().hex[:8]}"
@@ -30,14 +31,12 @@ def create_bucket_and_upload():
     print(f"✅ Uploaded {SCRIPT_PATH} to s3://{bucket_name}/{SCRIPT_KEY}")
     return bucket_name
 
-
 def get_default_subnet():
     print("Fetching default subnet...")
     subnets = ec2.describe_subnets(Filters=[{"Name": "default-for-az", "Values": ["true"]}])
     subnet_id = subnets["Subnets"][0]["SubnetId"]
     print(f"Using subnet: {subnet_id}")
     return subnet_id
-
 
 def deploy_stack(bucket, subnet):
     print("Deploying CloudFormation stack...")
@@ -72,7 +71,6 @@ def deploy_stack(bucket, subnet):
             print(f"⚠️ Could not fetch failure events: {log_err}")
         return False
 
-
 def get_stack_output(key):
     response = cf.describe_stacks(StackName=STACK_NAME)
     outputs = response["Stacks"][0].get("Outputs", [])
@@ -81,6 +79,30 @@ def get_stack_output(key):
             return output["OutputValue"]
     return None
 
+def wait_for_instance_initialization(asg_name):
+    print("⏳ Waiting for EC2 instance to initialize...")
+    for attempt in range(30):
+        group = asg.describe_auto_scaling_groups(AutoScalingGroupNames=[asg_name])["AutoScalingGroups"][0]
+        instance_ids = [i["InstanceId"] for i in group["Instances"] if i["LifecycleState"] == "InService"]
+
+        if not instance_ids:
+            print("🔍 No instance in service yet. Retrying...")
+            time.sleep(10)
+            continue
+
+        instance_id = instance_ids[0]
+        statuses = ec2.describe_instance_status(InstanceIds=[instance_id])["InstanceStatuses"]
+        if statuses and all(
+            s["InstanceStatus"]["Status"] == "ok" and s["SystemStatus"]["Status"] == "ok"
+            for s in statuses
+        ):
+            print(f"✅ EC2 instance {instance_id} is initialized and healthy.")
+            return instance_id
+
+        print(f"🔄 Instance status not yet healthy (attempt {attempt + 1}/30)...")
+        time.sleep(10)
+
+    raise Exception("❌ Timeout waiting for EC2 instance to initialize.")
 
 def update_lambda_env(lambda_name, queue_url, asg_name):
     print("🔧 Waiting for Lambda to become active before updating environment...")
@@ -107,7 +129,6 @@ def update_lambda_env(lambda_name, queue_url, asg_name):
     )
     print("✅ Lambda environment updated.")
 
-
 def zip_and_deploy_lambda():
     print("📦 Zipping and deploying Lambda...")
     with zipfile.ZipFile(ZIP_NAME, 'w') as zipf:
@@ -131,7 +152,6 @@ def zip_and_deploy_lambda():
             Environment={"Variables": {"QUEUE_URL": "placeholder", "ASG_NAME": "placeholder"}},
         )
         print("✅ Lambda function created.")
-
 
 def ensure_eventbridge_rule(lambda_arn):
     print("🔍 Checking if EventBridge rule exists...")
@@ -176,7 +196,6 @@ def ensure_eventbridge_rule(lambda_arn):
 
     print("✅ EventBridge rule and Lambda target verified.")
 
-
 def cleanup_all_worker_buckets():
     print("🧹 Scanning for old worker-buckets to delete...")
     s3_resource = boto3.resource("s3", region_name=REGION)
@@ -189,7 +208,6 @@ def cleanup_all_worker_buckets():
                 print(f"✅ Deleted: {bucket.name}")
             except Exception as e:
                 print(f"⚠️ Failed to delete {bucket.name}: {e}")
-
 
 if __name__ == "__main__":
     bucket_name = create_bucket_and_upload()
@@ -207,6 +225,17 @@ if __name__ == "__main__":
     print(f"ℹ️ Auto Scaling Group Name: {asg_name}")
 
     zip_and_deploy_lambda()
+    instance_id = wait_for_instance_initialization(asg_name)
+
+    # Store instance ID in SSM Parameter Store so Lambda can send commands
+    ssm.put_parameter(
+        Name="/sqs-worker/instance-id",
+        Value=instance_id,
+        Type="String",
+        Overwrite=True
+    )
+    print(f"✅ Stored instance ID {instance_id} in SSM.")
+
     update_lambda_env(LAMBDA_NAME, queue_url, asg_name)
     lambda_arn = lambda_client.get_function(FunctionName=LAMBDA_NAME)["Configuration"]["FunctionArn"]
     ensure_eventbridge_rule(lambda_arn)

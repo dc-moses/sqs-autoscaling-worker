@@ -40,7 +40,7 @@ jobs:
           echo "SUBNET_ID=$SUBNET_ID" >> $GITHUB_ENV
           echo "Discovered subnet: $SUBNET_ID"
 
-      - name: Deploy CloudFormation stack
+      - name: Deploy CloudFormation stack and Lambda
         run: |
           set +e
           echo "AWS_ACCOUNT_ID=${{ secrets.AWS_ACCOUNT_ID }}" >> $GITHUB_ENV
@@ -53,41 +53,6 @@ jobs:
               --output table || echo "⚠️ Failed to fetch stack events."
           fi
           exit $STATUS
-
-      - name: Deploy or Create Lambda function
-        run: |
-          zip lambda.zip lambda_trigger.py
-          if aws lambda get-function --function-name $LAMBDA_NAME > /dev/null 2>&1; then
-            aws lambda update-function-code \
-              --function-name $LAMBDA_NAME \
-              --zip-file fileb://lambda.zip
-          else
-            aws lambda create-function \
-              --function-name $LAMBDA_NAME \
-              --runtime python3.10 \
-              --role arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-ci-role \
-              --handler lambda_trigger.lambda_handler \
-              --zip-file fileb://lambda.zip \
-              --environment '{"Variables":{"QUEUE_URL":"dummy-to-be-updated","ASG_NAME":"dummy"}}'
-          fi
-
-      - name: Update Lambda environment with real queue URL and ASG name
-        run: |
-          QUEUE_URL=$(aws cloudformation describe-stacks \
-            --stack-name SQSWorkerStack \
-            --query "Stacks[0].Outputs[?OutputKey=='SQSQueueURL'].OutputValue" \
-            --output text)
-
-          ASG_NAME=$(aws cloudformation describe-stack-resources \
-            --stack-name SQSWorkerStack \
-            --query "StackResources[?ResourceType=='AWS::AutoScaling::AutoScalingGroup'].PhysicalResourceId" \
-            --output text)
-
-          echo "Updating Lambda with QUEUE_URL=$QUEUE_URL and ASG_NAME=$ASG_NAME"
-
-          aws lambda update-function-configuration \
-            --function-name $LAMBDA_NAME \
-            --environment "{\"Variables\":{\"QUEUE_URL\":\"$QUEUE_URL\",\"ASG_NAME\":\"$ASG_NAME\"}}"
 
       - name: Deploy API Gateway
         run: |
@@ -112,15 +77,15 @@ jobs:
             --output text)
 
           for i in {1..10}; do
-            MESSAGE_COUNT=$(aws sqs get-queue-attributes \
+            COUNT=$(aws sqs get-queue-attributes \
               --queue-url "$QUEUE_URL" \
               --attribute-names ApproximateNumberOfMessages \
               --query "Attributes.ApproximateNumberOfMessages" \
               --output text)
 
-            echo "Poll $i: Queue has $MESSAGE_COUNT visible message(s)"
-            if [ "$MESSAGE_COUNT" -ge 1 ]; then
-              echo "✅ Message detected in SQS queue."
+            echo "Poll $i: Queue has $COUNT visible message(s)"
+            if [ "$COUNT" -ge 1 ]; then
+              echo "✅ Message detected."
               break
             fi
 
@@ -131,64 +96,85 @@ jobs:
             sleep 10
           done
 
-      - name: Wait for ASG to scale up
+      - name: Wait for ASG scale-up and EC2 readiness
         run: |
           ASG_NAME=$(aws cloudformation describe-stack-resources \
             --stack-name SQSWorkerStack \
             --query "StackResources[?ResourceType=='AWS::AutoScaling::AutoScalingGroup'].PhysicalResourceId" \
             --output text)
 
-          echo "Polling ASG: $ASG_NAME for scale-up..."
+          echo "🔍 Waiting for ASG to scale up..."
           for i in {1..40}; do
-            DESIRED=$(aws autoscaling describe-auto-scaling-groups \
-              --auto-scaling-group-names "$ASG_NAME" \
-              --query "AutoScalingGroups[0].DesiredCapacity" \
-              --output text)
-
             INSTANCE_ID=$(aws autoscaling describe-auto-scaling-groups \
               --auto-scaling-group-names "$ASG_NAME" \
               --query "AutoScalingGroups[0].Instances[0].InstanceId" \
               --output text)
 
-            if [[ "$DESIRED" =~ ^[0-9]+$ ]] && [ "$DESIRED" -ge 1 ] && [ "$INSTANCE_ID" != "None" ]; then
-              echo "✅ ASG scaled up with instance $INSTANCE_ID."
+            STATE=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
+              --query "Reservations[0].Instances[0].State.Name" --output text)
+
+            echo "Poll $i: Instance $INSTANCE_ID state: $STATE"
+            if [ "$STATE" == "running" ]; then
+              echo "✅ Instance is running."
               break
             fi
-            sleep 30
+            sleep 10
           done
 
-      - name: Confirm SQS is empty before checking scale-down
-        run: |
-          echo "🔍 Waiting for SQS queue to empty before checking scale-down..."
-          QUEUE_URL=$(aws cloudformation describe-stacks \
-            --stack-name SQSWorkerStack \
-            --query "Stacks[0].Outputs[?OutputKey=='SQSQueueURL'].OutputValue" \
-            --output text)
-
-          for i in {1..10}; do
-            VISIBLE=$(aws sqs get-queue-attributes \
-              --queue-url "$QUEUE_URL" \
-              --attribute-names ApproximateNumberOfMessages \
-              --query "Attributes.ApproximateNumberOfMessages" \
+          echo "Waiting for instance health check..."
+          for j in {1..20}; do
+            STATUS=$(aws ec2 describe-instance-status \
+              --instance-ids "$INSTANCE_ID" \
+              --query "InstanceStatuses[0].InstanceStatus.Status" \
               --output text)
 
-            NOT_VISIBLE=$(aws sqs get-queue-attributes \
-              --queue-url "$QUEUE_URL" \
-              --attribute-names ApproximateNumberOfMessagesNotVisible \
-              --query "Attributes.ApproximateNumberOfMessagesNotVisible" \
-              --output text)
-
-            TOTAL=$((VISIBLE + NOT_VISIBLE))
-            echo "Poll $i: Queue visible=$VISIBLE not_visible=$NOT_VISIBLE total=$TOTAL"
-
-            if [ "$TOTAL" -eq 0 ]; then
-              echo "✅ SQS queue is empty."
+            echo "Health poll $j: Instance status is $STATUS"
+            if [ "$STATUS" == "ok" ]; then
+              echo "✅ Instance is healthy."
               break
             fi
+            sleep 10
+          done
 
-            if [ "$i" -eq 10 ]; then
-              echo "❌ SQS queue not empty after waiting. Failing."
-              exit 1
+      - name: Confirm EC2 processed SQS job via SSM
+        run: |
+          INSTANCE_ID=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names SQSWorkerStack-AutoScalingGroup \
+            --query "AutoScalingGroups[0].Instances[0].InstanceId" \
+            --output text)
+
+          echo "🔍 Invoking SSM to check /var/log/worker.log on instance $INSTANCE_ID..."
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Check if job was processed" \
+            --parameters commands="cat /var/log/worker.log" \
+            --query "Command.CommandId" \
+            --output text)
+
+          for i in {1..20}; do
+            STATUS=$(aws ssm get-command-invocation \
+              --instance-id "$INSTANCE_ID" \
+              --command-id "$COMMAND_ID" \
+              --query "Status" --output text)
+
+            echo "Poll $i: SSM status is $STATUS"
+
+            if [ "$STATUS" == "Success" ]; then
+              OUTPUT=$(aws ssm get-command-invocation \
+                --instance-id "$INSTANCE_ID" \
+                --command-id "$COMMAND_ID" \
+                --query "StandardOutputContent" --output text)
+
+              echo "$OUTPUT"
+
+              if echo "$OUTPUT" | grep -q "\[Worker\] Done."; then
+                echo "✅ Confirmed: EC2 processed the SQS job."
+                break
+              else
+                echo "❌ Job log did not confirm processing."
+                exit 1
+              fi
             fi
             sleep 10
           done
