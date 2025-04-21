@@ -52,14 +52,13 @@ Resources:
             echo "[UserData] Bootstrapping instance..." >> /var/log/worker.log
             yum install -y python3 aws-cli >> /var/log/worker.log 2>&1
             pip3 install boto3 >> /var/log/worker.log 2>&1
+
             aws s3 cp s3://${WorkerScriptBucket}/${WorkerScriptKey} /home/ec2-user/worker.py >> /var/log/worker.log 2>&1
             chmod +x /home/ec2-user/worker.py
-            echo "[UserData] Setup complete" >> /var/log/worker.log
+
+            QUEUE_URL="${WorkerQueue}"
             echo "[UserData] Starting worker.py with QUEUE_URL=${WorkerQueue}" >> /var/log/worker.log
             nohup python3 /home/ec2-user/worker.py "${WorkerQueue}" >> /var/log/worker.log 2>&1 &
-
-            echo "[UserData] Starting worker.py with QUEUE_URL=$QUEUE_URL" >> /var/log/worker.log
-            nohup python3 /home/ec2-user/worker.py "$QUEUE_URL" >> /var/log/worker.log 2>&1 &
 
   AutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
